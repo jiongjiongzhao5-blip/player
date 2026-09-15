@@ -1,0 +1,8 @@
+# ninja log v6
+11	232	8110887159680381	voice_player_learn_autogen/timestamp	3f38773180e2d798
+11	232	8110887159680381	voice_player_learn_autogen/mocs_compilation.cpp	3f38773180e2d798
+11	232	8110887159680381	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/timestamp	3f38773180e2d798
+11	232	8110887159680381	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/mocs_compilation.cpp	3f38773180e2d798
+235	291	8110887160490319	CMakeFiles/voice_player_learn.dir/voice_player_learn_autogen/mocs_compilation.cpp.obj	fd6f11a7ff798c6c
+241	1987	8110887160560328	CMakeFiles/voice_player_learn.dir/src/main.cpp.obj	291f1471bdd9a093
+1988	2449	8110887178023866	voice_player_learn.exe	2ca9030d934c0aac
