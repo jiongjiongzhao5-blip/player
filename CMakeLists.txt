@@ -33,9 +33,6 @@ endif()
 if(DEFINED ENV{QT_ROOT})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_ROOT}")
 endif()
-
-set(CMAKE_PREFIX_PATH "C:/Apps/QTnew/6.7.3/msvc2022_64" ${CMAKE_PREFIX_PATH})
-
 find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets)
 
 # ===========================================================================
@@ -153,8 +150,6 @@ endfunction()
 # 仍然没有 WIN32 关键字 —— 保留控制台看日志。
 add_executable(voice_player_learn
     src/main.cpp
-    src/av_utils.h
-    .gitignore
 )
 target_include_directories(voice_player_learn PRIVATE src)
 target_link_libraries(voice_player_learn PRIVATE
@@ -177,3 +172,18 @@ target_include_directories(test_av_utils PRIVATE src)
 target_link_libraries(test_av_utils PRIVATE vpl_ffmpeg)
 vpl_apply_common_options(test_av_utils)
 vpl_copy_runtime_dlls(test_av_utils)
+
+# ===========================================================================
+# 6. M3 测试目标：线程安全队列
+# ===========================================================================
+# packet_queue.cpp / frame_queue.cpp 是真正的实现文件，必须一起编译进来。
+# （主程序 voice_player_learn 现在还不需要它们，等到 M8 才会加上。）
+add_executable(test_queues
+    tests/test_queues.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+)
+target_include_directories(test_queues PRIVATE src)
+target_link_libraries(test_queues PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(test_queues)
+vpl_copy_runtime_dlls(test_queues)
