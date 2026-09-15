@@ -1,8 +1,0 @@
-# ninja log v6
-8	231	8111602192379166	test_av_utils_autogen/timestamp	35c6d767cc421bb7
-8	231	8111602192379166	test_av_utils_autogen/mocs_compilation.cpp	35c6d767cc421bb7
-8	231	8111602192379166	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/test_av_utils_autogen/timestamp	35c6d767cc421bb7
-8	231	8111602192379166	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/test_av_utils_autogen/mocs_compilation.cpp	35c6d767cc421bb7
-234	909	8111602193209103	CMakeFiles/test_av_utils.dir/test_av_utils_autogen/mocs_compilation.cpp.obj	e362419194e667a3
-240	1147	8111602193269153	CMakeFiles/test_av_utils.dir/tests/test_av_utils.cpp.obj	6b5352453c62b67f
-1148	1713	8111602202350229	test_av_utils.exe	7f51500e097c3084

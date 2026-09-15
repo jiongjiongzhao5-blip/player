@@ -1,5 +1,5 @@
 # ========== Qt 编译输出 & QtCreator本地配置 ==========
-build-*/
+build/
 .qtcreator/
 debug/
 release/
