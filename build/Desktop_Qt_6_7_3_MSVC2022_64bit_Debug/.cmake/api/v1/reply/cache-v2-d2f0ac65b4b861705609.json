@@ -1378,6 +1378,18 @@
 			"value" : "FALSE"
 		},
 		{
+			"name" : "FFMPEG_ROOT",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "FFmpeg \u5f00\u53d1\u5305\u6839\u76ee\u5f55\uff08\u542b include/\u3001lib/\u3001bin/\uff09"
+				}
+			],
+			"type" : "PATH",
+			"value" : ""
+		},
+		{
 			"name" : "HAVE_STDATOMIC",
 			"properties" : 
 			[
@@ -6048,6 +6060,186 @@
 			],
 			"type" : "FILEPATH",
 			"value" : "C:/Apps/QTnew/6.7.3/msvc2022_64/bin/windeployqt.exe"
+		},
+		{
+			"name" : "_FFMPEG_avcodec_DBG",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/debug/lib/avcodec.lib"
+		},
+		{
+			"name" : "_FFMPEG_avcodec_INC",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a file."
+				}
+			],
+			"type" : "PATH",
+			"value" : "C:/vcpkg/installed/x64-windows/include"
+		},
+		{
+			"name" : "_FFMPEG_avcodec_REL",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/lib/avcodec.lib"
+		},
+		{
+			"name" : "_FFMPEG_avformat_DBG",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/debug/lib/avformat.lib"
+		},
+		{
+			"name" : "_FFMPEG_avformat_INC",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a file."
+				}
+			],
+			"type" : "PATH",
+			"value" : "C:/vcpkg/installed/x64-windows/include"
+		},
+		{
+			"name" : "_FFMPEG_avformat_REL",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/lib/avformat.lib"
+		},
+		{
+			"name" : "_FFMPEG_avutil_DBG",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/debug/lib/avutil.lib"
+		},
+		{
+			"name" : "_FFMPEG_avutil_INC",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a file."
+				}
+			],
+			"type" : "PATH",
+			"value" : "C:/vcpkg/installed/x64-windows/include"
+		},
+		{
+			"name" : "_FFMPEG_avutil_REL",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/lib/avutil.lib"
+		},
+		{
+			"name" : "_FFMPEG_swresample_DBG",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/debug/lib/swresample.lib"
+		},
+		{
+			"name" : "_FFMPEG_swresample_INC",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a file."
+				}
+			],
+			"type" : "PATH",
+			"value" : "C:/vcpkg/installed/x64-windows/include"
+		},
+		{
+			"name" : "_FFMPEG_swresample_REL",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/lib/swresample.lib"
+		},
+		{
+			"name" : "_FFMPEG_swscale_DBG",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/debug/lib/swscale.lib"
+		},
+		{
+			"name" : "_FFMPEG_swscale_INC",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a file."
+				}
+			],
+			"type" : "PATH",
+			"value" : "C:/vcpkg/installed/x64-windows/include"
+		},
+		{
+			"name" : "_FFMPEG_swscale_REL",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "Path to a library."
+				}
+			],
+			"type" : "FILEPATH",
+			"value" : "C:/vcpkg/installed/x64-windows/lib/swscale.lib"
 		},
 		{
 			"name" : "_GNUInstallDirs_LAST_CMAKE_INSTALL_PREFIX",

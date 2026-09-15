@@ -1,0 +1,66 @@
+# ========== Qt 编译生成文件 ==========
+# qmake / qt creator 生成
+build-*/
+debug/
+release/
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+*.pri.user
+*.pri.user.*
+*.ui.h
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# CMake 构建（如果你用CMake而不是qmake）
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# ========== 编译产物、目标程序 ==========
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.lib
+*.pdb
+*.exp
+
+# ========== 临时文件、备份 ==========
+*~
+*.bak
+*.tmp
+*.swp
+*.swo
+
+# ========== IDE 编辑器文件 ==========
+# Qt Creator
+.qtcreator/
+.qtcreator.user
+*.autosave
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Clion / JetBrains
+.idea/
+*.iml
+
+# ========== 系统文件 ==========
+# macOS
+.DS_Store
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# ========== 日志、配置 ==========
+*.log
+*.env

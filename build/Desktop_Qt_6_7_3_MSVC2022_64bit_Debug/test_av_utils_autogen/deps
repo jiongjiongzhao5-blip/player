@@ -1,4 +1,4 @@
-voice_player_learn_autogen/timestamp: \
+test_av_utils_autogen/timestamp: \
 	C:/Apps/QTnew/6.7.3/msvc2022_64/lib/cmake/Qt6/FindWrapAtomic.cmake \
 	C:/Apps/QTnew/6.7.3/msvc2022_64/lib/cmake/Qt6/FindWrapVulkanHeaders.cmake \
 	C:/Apps/QTnew/6.7.3/msvc2022_64/lib/cmake/Qt6/Qt6Config.cmake \
@@ -250,5 +250,5 @@ voice_player_learn_autogen/timestamp: \
 	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/CMakeFiles/3.30.5/CMakeCXXCompiler.cmake \
 	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/CMakeFiles/3.30.5/CMakeRCCompiler.cmake \
 	C:/Workspace/Documents/开发/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/CMakeFiles/3.30.5/CMakeSystem.cmake \
-	C:/Workspace/Documents/开发/player/src/main.cpp \
+	C:/Workspace/Documents/开发/player/tests/test_av_utils.cpp \
 	C:/Apps/QTnew/Tools/CMake_64/bin/cmake.exe

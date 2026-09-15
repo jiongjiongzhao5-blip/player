@@ -350,7 +350,15 @@
 	"CROSS_CONFIG" : false,
 	"DEP_FILE" : "C:/Workspace/Documents/\u5f00\u53d1/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/deps",
 	"DEP_FILE_RULE_NAME" : "voice_player_learn_autogen/timestamp",
-	"HEADERS" : [],
+	"HEADERS" : 
+	[
+		[
+			"C:/Workspace/Documents/\u5f00\u53d1/player/src/av_utils.h",
+			"Mu",
+			"UVLADIE3JM/moc_av_utils.cpp",
+			null
+		]
+	],
 	"HEADER_EXTENSIONS" : [ "h", "hh", "h++", "hm", "hpp", "hxx", "in", "txx" ],
 	"INCLUDE_DIR" : "C:/Workspace/Documents/\u5f00\u53d1/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/include",
 	"MOC_COMPILATION_FILE" : "C:/Workspace/Documents/\u5f00\u53d1/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/mocs_compilation.cpp",
@@ -379,6 +387,8 @@
 	],
 	"MOC_INCLUDES" : 
 	[
+		"C:/Workspace/Documents/\u5f00\u53d1/player/src",
+		"C:/vcpkg/installed/x64-windows/include",
 		"C:/Apps/QTnew/6.7.3/msvc2022_64/include/QtWidgets",
 		"C:/Apps/QTnew/6.7.3/msvc2022_64/include",
 		"C:/Apps/QTnew/6.7.3/msvc2022_64/include/QtCore",

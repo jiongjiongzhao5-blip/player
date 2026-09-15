@@ -21,9 +21,11 @@
 			"find_dependency",
 			"_qt_internal_find_qt_dependencies",
 			"target_compile_options",
+			"vpl_apply_common_options",
 			"target_compile_definitions",
 			"add_compile_definitions",
-			"project"
+			"project",
+			"target_include_directories"
 		],
 		"files" : 
 		[
@@ -48,19 +50,19 @@
 			{
 				"command" : 0,
 				"file" : 0,
-				"line" : 22,
+				"line" : 154,
 				"parent" : 0
 			},
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 26,
+				"line" : 160,
 				"parent" : 0
 			},
 			{
 				"command" : 4,
 				"file" : 0,
-				"line" : 20,
+				"line" : 39,
 				"parent" : 0
 			},
 			{
@@ -182,32 +184,50 @@
 				"parent" : 24
 			},
 			{
-				"command" : 7,
+				"command" : 1,
 				"file" : 0,
-				"line" : 29,
+				"line" : 123,
 				"parent" : 0
 			},
 			{
 				"command" : 8,
 				"file" : 0,
-				"line" : 34,
+				"line" : 164,
 				"parent" : 0
 			},
 			{
-				"command" : 10,
+				"command" : 7,
 				"file" : 0,
-				"line" : 3,
-				"parent" : 0
-			},
-			{
-				"file" : 11,
-				"parent" : 28
+				"line" : 130,
+				"parent" : 27
 			},
 			{
 				"command" : 9,
+				"file" : 0,
+				"line" : 131,
+				"parent" : 27
+			},
+			{
+				"command" : 11,
+				"file" : 0,
+				"line" : 14,
+				"parent" : 0
+			},
+			{
+				"file" : 11,
+				"parent" : 30
+			},
+			{
+				"command" : 10,
 				"file" : 11,
 				"line" : 82,
-				"parent" : 29
+				"parent" : 31
+			},
+			{
+				"command" : 12,
+				"file" : 0,
+				"line" : 159,
+				"parent" : 0
 			}
 		]
 	},
@@ -220,15 +240,15 @@
 					"fragment" : "/DWIN32 /D_WINDOWS /EHsc /Zi /Ob0 /Od /RTC1 -std:c++17 -MDd"
 				},
 				{
-					"backtrace" : 26,
+					"backtrace" : 28,
 					"fragment" : "/utf-8"
 				},
 				{
-					"backtrace" : 26,
+					"backtrace" : 28,
 					"fragment" : "/W3"
 				},
 				{
-					"backtrace" : 26,
+					"backtrace" : 28,
 					"fragment" : "/permissive-"
 				},
 				{
@@ -247,7 +267,7 @@
 			"defines" : 
 			[
 				{
-					"backtrace" : 27,
+					"backtrace" : 29,
 					"define" : "NOMINMAX"
 				},
 				{
@@ -259,7 +279,7 @@
 					"define" : "QT_GUI_LIB"
 				},
 				{
-					"backtrace" : 30,
+					"backtrace" : 32,
 					"define" : "QT_QML_DEBUG"
 				},
 				{
@@ -275,7 +295,7 @@
 					"define" : "WIN32"
 				},
 				{
-					"backtrace" : 27,
+					"backtrace" : 29,
 					"define" : "WIN32_LEAN_AND_MEAN"
 				},
 				{
@@ -283,7 +303,7 @@
 					"define" : "WIN64"
 				},
 				{
-					"backtrace" : 27,
+					"backtrace" : 29,
 					"define" : "_CRT_SECURE_NO_WARNINGS"
 				},
 				{
@@ -304,6 +324,14 @@
 				{
 					"backtrace" : 0,
 					"path" : "C:/Workspace/Documents/\u5f00\u53d1/player/build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/include"
+				},
+				{
+					"backtrace" : 33,
+					"path" : "C:/Workspace/Documents/\u5f00\u53d1/player/src"
+				},
+				{
+					"backtrace" : 2,
+					"path" : "C:/vcpkg/installed/x64-windows/include"
 				},
 				{
 					"backtrace" : 2,
@@ -417,6 +445,31 @@
 				"role" : "libraries"
 			},
 			{
+				"backtrace" : 26,
+				"fragment" : "C:\\vcpkg\\installed\\x64-windows\\debug\\lib\\avformat.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 26,
+				"fragment" : "C:\\vcpkg\\installed\\x64-windows\\debug\\lib\\avcodec.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 26,
+				"fragment" : "C:\\vcpkg\\installed\\x64-windows\\debug\\lib\\avutil.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 26,
+				"fragment" : "C:\\vcpkg\\installed\\x64-windows\\debug\\lib\\swresample.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 26,
+				"fragment" : "C:\\vcpkg\\installed\\x64-windows\\debug\\lib\\swscale.lib",
+				"role" : "libraries"
+			},
+			{
 				"fragment" : "kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib",
 				"role" : "libraries"
 			}
@@ -441,17 +494,25 @@
 			]
 		},
 		{
-			"name" : "",
+			"name" : "Header Files",
 			"sourceIndexes" : 
 			[
 				2
 			]
 		},
 		{
+			"name" : "",
+			"sourceIndexes" : 
+			[
+				3,
+				4
+			]
+		},
+		{
 			"name" : "CMake Rules",
 			"sourceIndexes" : 
 			[
-				3
+				5
 			]
 		}
 	],
@@ -471,16 +532,26 @@
 			"sourceGroupIndex" : 0
 		},
 		{
+			"backtrace" : 1,
+			"path" : "src/av_utils.h",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : ".gitignore",
+			"sourceGroupIndex" : 2
+		},
+		{
 			"backtrace" : 0,
 			"isGenerated" : true,
 			"path" : "build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/timestamp",
-			"sourceGroupIndex" : 1
+			"sourceGroupIndex" : 2
 		},
 		{
 			"backtrace" : 0,
 			"isGenerated" : true,
 			"path" : "build/Desktop_Qt_6_7_3_MSVC2022_64bit_Debug/voice_player_learn_autogen/timestamp.rule",
-			"sourceGroupIndex" : 2
+			"sourceGroupIndex" : 3
 		}
 	],
 	"type" : "EXECUTABLE"
