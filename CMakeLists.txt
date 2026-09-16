@@ -187,3 +187,17 @@ target_include_directories(test_queues PRIVATE src)
 target_link_libraries(test_queues PRIVATE vpl_ffmpeg)
 vpl_apply_common_options(test_queues)
 vpl_copy_runtime_dlls(test_queues)
+
+# ===========================================================================
+# 7. M4 测试目标：内核消息机制
+# ===========================================================================
+# message_queue 不依赖 FFmpeg，但仍链接 vpl_ffmpeg —— 保持所有测试目标
+# 配置一致，省得以后加东西时漏改。
+add_executable(test_message_queue
+    tests/test_message_queue.cpp
+    src/message_queue.cpp
+)
+target_include_directories(test_message_queue PRIVATE src)
+target_link_libraries(test_message_queue PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(test_message_queue)
+vpl_copy_runtime_dlls(test_message_queue)

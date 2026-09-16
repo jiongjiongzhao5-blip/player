@@ -25,7 +25,7 @@ int main(int argc, char* argv[])
     //    QSettings / QStandardPaths 会用它们拼出配置目录，
     //    setApplicationName 还会影响部分平台下的任务管理器显示名。
     QApplication::setApplicationName(QStringLiteral("voice_player_qt6"));
-    QApplication::setOrganizationName(QStringLiteral("0voice"));
+    QApplication::setOrganizationName(QStringLiteral("ZJJ"));
 
     // 3) 主窗口建在栈上（不是 new）。
     //    QApplication 退出后自动析构，不需要 delete，也不会泄漏。
