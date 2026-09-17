@@ -201,3 +201,16 @@ target_include_directories(test_message_queue PRIVATE src)
 target_link_libraries(test_message_queue PRIVATE vpl_ffmpeg)
 vpl_apply_common_options(test_message_queue)
 vpl_copy_runtime_dlls(test_message_queue)
+
+# ===========================================================================
+# 8. M5 测试目标：同步时钟
+# ===========================================================================
+# clock.h 是 header-only（实现在类体内），所以不需要额外的 .cpp。
+# 但要链接 vpl_ffmpeg —— 因为它用了 av_gettime_relative()（在 libavutil 里）。
+add_executable(test_clock
+    tests/test_clock.cpp
+)
+target_include_directories(test_clock PRIVATE src)
+target_link_libraries(test_clock PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(test_clock)
+vpl_copy_runtime_dlls(test_clock)
