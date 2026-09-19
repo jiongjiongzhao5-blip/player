@@ -214,3 +214,32 @@ target_include_directories(test_clock PRIVATE src)
 target_link_libraries(test_clock PRIVATE vpl_ffmpeg)
 vpl_apply_common_options(test_clock)
 vpl_copy_runtime_dlls(test_clock)
+
+# ===========================================================================
+# 9. 工具目标（★ M6 新增）：测试素材生成器
+# ===========================================================================
+# 课程目录里没有任何音视频素材，vcpkg 也没带 ffmpeg.exe。
+# M6 之后每个模块都需要真实文件，所以用 FFmpeg 的编码 API 现场造一个。
+# 它不属于最终工程，纯粹是开发期的辅助工具。
+add_executable(make_test_media
+    tools/make_test_media.cpp
+)
+target_include_directories(make_test_media PRIVATE src)
+target_link_libraries(make_test_media PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(make_test_media)
+vpl_copy_runtime_dlls(make_test_media)
+
+# ===========================================================================
+# 10. M6 测试目标：解码器封装
+# ===========================================================================
+# decoder.cpp 需要 packet_queue.cpp（上游）和 frame_queue.cpp（abort 时发信号）。
+add_executable(test_decoder
+    tests/test_decoder.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+)
+target_include_directories(test_decoder PRIVATE src)
+target_link_libraries(test_decoder PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(test_decoder)
+vpl_copy_runtime_dlls(test_decoder)
