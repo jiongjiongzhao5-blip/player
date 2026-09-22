@@ -243,3 +243,85 @@ target_include_directories(test_decoder PRIVATE src)
 target_link_libraries(test_decoder PRIVATE vpl_ffmpeg)
 vpl_apply_common_options(test_decoder)
 vpl_copy_runtime_dlls(test_decoder)
+
+# ===========================================================================
+# 11. SDL3（★ M7 新增）
+# ===========================================================================
+# 本目录内置了一份 SDL3 的 VC 开发包（third_party/SDL3），所以我们【不用】
+# 系统安装的 SDL3，直接指向内置的那份，保证换台机器也能编译。
+#
+# 为什么不像 Qt6 那样用 find_package(SDL3)？
+#   内置包里的 SDL3Config.cmake 没有做"架构探测"（它不知道要挑
+#   lib/x64 还是 lib/x86），直接 find_package 会因为找不到对应架构的
+#   库而失败。所以这里按目录结构【手工创建】一个导入目标 SDL3::SDL3 ——
+#   最土但最稳，也顺便让你看清"导入一个预编译库"到底需要哪几样东西：
+#     ① 头文件目录  ② 链接用的 .lib  ③ 运行时用的 .dll
+# ---------------------------------------------------------------------------
+set(SDL3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3"
+    CACHE PATH "SDL3 开发包根目录")
+
+# 按目标架构挑库目录。MSVC 在 ARM64 上不会定义 CMAKE_SIZEOF_VOID_P，
+# 所以先用 MSVC_CXX_ARCHITECTURE_ID 判一次，再退回按指针宽度判。
+if(MSVC_CXX_ARCHITECTURE_ID MATCHES "ARM64")
+    set(_SDL3_ARCH arm64)
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(_SDL3_ARCH x64)
+else()
+    set(_SDL3_ARCH x86)
+endif()
+
+set(_SDL3_INCLUDE_DIR "${SDL3_ROOT}/include")
+set(_SDL3_IMPLIB      "${SDL3_ROOT}/lib/${_SDL3_ARCH}/SDL3.lib")
+set(_SDL3_DLL         "${SDL3_ROOT}/lib/${_SDL3_ARCH}/SDL3.dll")
+
+if(NOT EXISTS "${_SDL3_IMPLIB}")
+    message(FATAL_ERROR "未找到 ${_SDL3_IMPLIB}，请检查 third_party/SDL3 目录。")
+endif()
+
+add_library(SDL3::SDL3 SHARED IMPORTED)
+set_target_properties(SDL3::SDL3 PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_SDL3_INCLUDE_DIR}"
+    IMPORTED_IMPLIB               "${_SDL3_IMPLIB}"
+    IMPORTED_LOCATION             "${_SDL3_DLL}")
+message(STATUS "SDL3 (${_SDL3_ARCH}): ${_SDL3_IMPLIB}")
+
+# 构建后把 SDL3.dll 拷到 exe 旁边（否则运行时报缺 DLL）
+function(vpl_copy_sdl3_dll tgt)
+    if(WIN32)
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_SDL3_DLL}" "$<TARGET_FILE_DIR:${tgt}>"
+            COMMENT "拷贝 SDL3.dll")
+    endif()
+endfunction()
+
+# ===========================================================================
+# 12. M7 测试目标：图像转换器
+# ===========================================================================
+add_executable(test_imagescaler
+    tests/test_imagescaler.cpp
+    src/imagescaler.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+)
+target_include_directories(test_imagescaler PRIVATE src)
+target_link_libraries(test_imagescaler PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(test_imagescaler)
+vpl_copy_runtime_dlls(test_imagescaler)
+
+# ===========================================================================
+# 13. M7 测试目标：音频输出设备
+# ===========================================================================
+add_executable(test_audiodevice
+    tests/test_audiodevice.cpp
+    src/audiodevice.cpp
+)
+target_include_directories(test_audiodevice PRIVATE src)
+target_link_libraries(test_audiodevice PRIVATE
+    SDL3::SDL3
+    vpl_ffmpeg
+)
+vpl_apply_common_options(test_audiodevice)
+vpl_copy_runtime_dlls(test_audiodevice)
+vpl_copy_sdl3_dll(test_audiodevice)
