@@ -144,12 +144,15 @@ int main(int argc, char* argv[])
     SetConsoleOutputCP(CP_UTF8);
 
     const std::string outPath = (argc > 1) ? argv[1] : "test_media.mp4";
+    // 第二参数传 "videoonly" 就生成纯视频素材（M10 验证外部时钟降级路径用）
+    const bool videoOnly = (argc > 2 && std::strcmp(argv[2], "videoonly") == 0);
 
     std::printf("==================================================\n");
     std::printf(" 测试素材生成器\n");
-    std::printf(" 目标: %s\n", outPath.c_str());
-    std::printf(" 规格: %dx%d @ %dfps, %d 秒 | %dHz %d 声道\n",
-                kWidth, kHeight, kFps, kSeconds, kSampleRate, kChannels);
+    std::printf(" 目标: %s%s\n", outPath.c_str(), videoOnly ? "  [纯视频]" : "");
+    std::printf(" 规格: %dx%d @ %dfps, %d 秒%s\n",
+                kWidth, kHeight, kFps, kSeconds,
+                videoOnly ? "" : " | 44100Hz 2 声道");
     std::printf("==================================================\n");
 
     // -----------------------------------------------------------------------
@@ -197,23 +200,24 @@ int main(int argc, char* argv[])
 
     // -----------------------------------------------------------------------
     // 3. 音频流（AAC，FFmpeg 内置编码器）
+    //    第二参数传 "videoonly" 时整段跳过 —— 用来生成"纯视频"素材，
+    //    以便验证 FFPlayer 在【没有音频流】时的外部时钟降级路径（M10 用）。
     // -----------------------------------------------------------------------
     AVStream* ast = nullptr;
-    AVCodecContext* ac = openStream(oc, &ast, AV_CODEC_ID_AAC, "aac");
-    if (!ac)
-        return 1;
-    ac->sample_rate = kSampleRate;
-    av_channel_layout_default(&ac->ch_layout, kChannels);
-    ac->time_base   = AVRational{1, kSampleRate};   // 音频以"采样"为时间单位
-    ac->bit_rate    = 128000;
+    AVCodecContext* ac = nullptr;
 
-    // ★ FFmpeg 8/9 的破坏性变化：AVCodec 结构体已经私有化，
-    //   原来直接读的 codec->sample_fmts / codec->pix_fmts / codec->priv_data_size
-    //   等字段【全部移除】了（现在 AVCodec 只剩 name/type/id/capabilities 等 9 个字段）。
-    //   要查询编码器支持哪些格式，必须改用 avcodec_get_supported_config()。
-    //   这是 FFmpeg 的一贯趋势：把公开结构体的字段一步步藏到 getter API 后面，
-    //   这样库内部改 ABI 时不会把用户代码一起打断。
-    {
+    if (!videoOnly) {
+        ac = openStream(oc, &ast, AV_CODEC_ID_AAC, "aac");
+        if (!ac)
+            return 1;
+        ac->sample_rate = kSampleRate;
+        av_channel_layout_default(&ac->ch_layout, kChannels);
+        ac->time_base   = AVRational{1, kSampleRate};   // 音频以"采样"为时间单位
+        ac->bit_rate    = 128000;
+
+        // ★ FFmpeg 8/9 的破坏性变化：AVCodec 结构体已经私有化，
+        //   原来直接读的 codec->sample_fmts / codec->pix_fmts 等字段【全部移除】。
+        //   要查询编码器支持哪些格式，必须改用 avcodec_get_supported_config()。
         ac->sample_fmt = AV_SAMPLE_FMT_NONE;
         const void* cfgList = nullptr;
         int cfgCount = 0;
@@ -229,22 +233,23 @@ int main(int argc, char* argv[])
             ac->sample_fmt = AV_SAMPLE_FMT_FLTP;   // AAC 的常规选择（32 位浮点、分平面）
             std::printf("  查询采样格式失败，回退为 FLTP\n");
         }
-    }
-    // 注意：frame_size 要等 avcodec_open2 之后才由编码器填好，现在还是 0
 
-    ret = avcodec_open2(ac, nullptr, nullptr);
-    if (ret < 0) {
-        std::fprintf(stderr, "打开音频编码器失败\n");
-        return 1;
+        ret = avcodec_open2(ac, nullptr, nullptr);
+        if (ret < 0) {
+            std::fprintf(stderr, "打开音频编码器失败\n");
+            return 1;
+        }
+        if (ac->frame_size <= 0) {
+            std::fprintf(stderr, "音频编码器未给出 frame_size，无法分包\n");
+            return 1;
+        }
+        std::printf("  音频采样格式: %s, 每帧 %d 个采样\n",
+                    av_get_sample_fmt_name(ac->sample_fmt), ac->frame_size);
+        avcodec_parameters_from_context(ast->codecpar, ac);
+        ast->time_base = ac->time_base;
+    } else {
+        std::printf("  [videoonly] 跳过音频流，生成纯视频素材\n");
     }
-    if (ac->frame_size <= 0) {
-        std::fprintf(stderr, "音频编码器未给出 frame_size，无法分包\n");
-        return 1;
-    }
-    std::printf("  音频采样格式: %s, 每帧 %d 个采样\n",
-                av_get_sample_fmt_name(ac->sample_fmt), ac->frame_size);
-    avcodec_parameters_from_context(ast->codecpar, ac);
-    ast->time_base = ac->time_base;
 
     // -----------------------------------------------------------------------
     // 4. 打开输出文件、写文件头
@@ -297,7 +302,7 @@ int main(int argc, char* argv[])
     // -----------------------------------------------------------------------
     // 6. 编码音频
     // -----------------------------------------------------------------------
-    {
+    if (!videoOnly) {
         AVFrame* frame = av_frame_alloc();
         frame->format      = ac->sample_fmt;
         frame->sample_rate = ac->sample_rate;
@@ -351,7 +356,7 @@ int main(int argc, char* argv[])
     if (!(oc->oformat->flags & AVFMT_NOFILE))
         avio_closep(&oc->pb);
     avcodec_free_context(&vc);
-    avcodec_free_context(&ac);
+    avcodec_free_context(&ac);   // ac 可能为 nullptr（videoonly），该函数能容忍
     avformat_free_context(oc);
 
     // -----------------------------------------------------------------------

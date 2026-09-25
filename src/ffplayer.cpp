@@ -11,6 +11,15 @@ namespace {
 // 队列容量（与 ffplay 保持一致）
 constexpr int kVideoQueueSize  = 3;    // 视频帧队列只开 3 个槽（M3 讲过原因）
 constexpr int kSampleQueueSize = 9;    // 音频帧小，可以多囤一点
+
+// 视频刷新的【基准】节拍（秒）。注意它不是"帧间隔"，而是"轮询间隔" ——
+// 真实睡眠时长会由 videoRefresh 按需缩短，详见那里的说明。
+constexpr double kRefreshInterval = 0.01;
+
+// 迟到多久就算"这一帧已经没意义了"，直接丢掉。
+// ffplay 用 AV_SYNC_THRESHOLD_MAX = 0.1s 作为"还能忍"的界限，这里取同一个值。
+// ⚠ 这是参考工程【没有】的改进，见 videoRefresh 里的说明。
+constexpr double kLateDropThreshold = 0.1;
 }  // namespace
 
 FFPlayer::FFPlayer()
@@ -33,6 +42,7 @@ int FFPlayer::prepare(const std::string& url)
     abort_  = false;
     paused_ = false;
     eof_    = false;
+    completedPosted_ = false;
     durationUs_ = AV_NOPTS_VALUE;
 
     // ★ 把帧队列和它上游的包队列"绑"起来。
@@ -45,9 +55,16 @@ int FFPlayer::prepare(const std::string& url)
     pictQ_.setPacketQueue(&videoQ_);
 
     audClk_.init();                 // 时钟复位成 NaN（未锚定状态）
+    videoClockInit_ = false;
+    completedPosted_ = false;
     msgQ_.start();
 
     readThr_ = std::thread(&FFPlayer::readThread, this);
+    // ★ 刷新线程在 prepare 里就启动（不等文件打开）——
+    //   因为它每轮开头就检查"视频流存在吗、暂停吗、有帧吗"，
+    //   条件不满足就直接返回，空转成本极低。早点启动可以让代码更简单：
+    //   不需要在 openComponent 里判断"线程是否已经起过"。
+    refreshThr_ = std::thread(&FFPlayer::videoRefreshThread, this);
 
     // 注意这里【没有】等音频设备打开、也没等解码线程起来 ——
     // 那些都在 readThread → openComponent 里做（异步）。
@@ -101,10 +118,12 @@ void FFPlayer::close()
 
     audioSt_ = videoSt_ = nullptr;
     audioIdx_ = videoIdx_ = -1;
-    audioBuf_ = nullptr;
+    audioBuf_ = nullptr;            // 兼作"缓冲是否有效"的标志
     audioBufSize_ = audioBufIndex_ = 0;
     audioClock_ = std::nan("");
     resampleBuf_.clear();
+    videoClockInit_ = false;
+    completedPosted_ = false;
     eof_ = false;
 }
 
@@ -184,6 +203,15 @@ FFPlayer::AudioOutInfo FFPlayer::audioOutInfo() const
     return info;
 }
 
+FFPlayer::DemuxInfo FFPlayer::demuxInfo() const
+{
+    DemuxInfo info;
+    info.audioPkts = statAudioPkts_.load();
+    info.videoPkts = statVideoPkts_.load();
+    info.nullPkts  = statNullPkts_.load();
+    return info;
+}
+
 // ---------------------------------------------------------------------------
 // handleSeekRequest —— 由 readThread 执行（M8 已讲）
 // ---------------------------------------------------------------------------
@@ -204,6 +232,12 @@ void FFPlayer::handleSeekRequest()
     videoQ_.reset();
     sampQ_.flush();
     pictQ_.flush();
+    // 纯视频时让外部时钟在 seek 后重新锚定到新位置的 PTS。
+    // 这不只是为了"跳到新位置"，更是为了兜住"队列里可能混进残留旧帧"
+    // 的情况 —— 详见 videoRefresh 里对条件 ③ 的说明。
+    videoClockInit_ = false;
+    completedPosted_ = false;
+    // seek 之后要允许重新通知"播放结束"（比如 seek 到接近结尾）
     eof_ = false;
 }
 
@@ -252,7 +286,9 @@ int FFPlayer::openComponent(AVStream* stream, AVMediaType type)
         videoTb_   = stream->time_base;
         frameRate_ = av_guess_frame_rate(ic_.get(), stream, nullptr);
         videoQ_.start();
-        // M10 会在这里启动视频解码线程
+
+        // 启动视频解码线程（与音频同样的"策略注入"模式）
+        vidDec_.start(videoQ_, [this] { videoDecodeThread(); });
     }
     return 0;
 }
@@ -329,8 +365,25 @@ void FFPlayer::readThread()
                 if (!eof_.exchange(true)) {
                     if (audioIdx_ >= 0) audioQ_.putNullPacket(audioIdx_);
                     if (videoIdx_ >= 0) videoQ_.putNullPacket(videoIdx_);
-                    msgQ_.post(FFMsg::Completed);
+                    statNullPkts_.fetch_add((audioIdx_ >= 0 ? 1 : 0)
+                                            + (videoIdx_ >= 0 ? 1 : 0));
                 }
+                // ★★ M10 修正：这里【不再】投递 FFMsg::Completed。
+                //
+                //   参考工程是在这里 post(Completed) 的，但它的语义是错的：
+                //   读线程只管【解复用】，它受队列背压限制、但远快于播放 ——
+                //   126KB 的素材几十毫秒就能全部读进队列，而播放要 5 秒。
+                //   实测：收到 Completed 时才播到 1.4 秒。
+                //
+                //   后果（在 M12 会直接暴露成 UI bug）：
+                //     MediaPlayer 收到 Completed 就把状态置为"播放完成"、
+                //     停掉进度条定时器 —— 于是刚点播放一秒，界面就显示
+                //     "已结束"，可声音和画面还在继续放 4 秒。
+                //
+                //   正确的语义：Completed 应该表示【播放真正结束】，
+                //   也就是"文件读完 + 队列里的数据也全被消费光"。
+                //   这个检测放在 videoRefresh 里做（那里是唯一持续运行的
+                //   时序循环，纯音频文件它也一样在跑）。
             }
             if (ic_->pb && ic_->pb->error)
                 break;
@@ -339,12 +392,15 @@ void FFPlayer::readThread()
         }
         eof_ = false;
 
-        if (pkt->stream_index == audioIdx_)
+        if (pkt->stream_index == audioIdx_) {
             audioQ_.put(pkt.get());
-        else if (pkt->stream_index == videoIdx_)
+            statAudioPkts_.fetch_add(1);      // 沙盒统计
+        } else if (pkt->stream_index == videoIdx_) {
             videoQ_.put(pkt.get());
-        else
+            statVideoPkts_.fetch_add(1);      // 沙盒统计
+        } else {
             av_packet_unref(pkt.get());
+        }
     }
 }
 
@@ -621,4 +677,192 @@ int FFPlayer::pullAudio(uint8_t* dst, int bytes)
     }
 
     return copied;
+}
+
+// ---------------------------------------------------------------------------
+// videoDecodeThread —— 视频解码线程：packet -> frame（入 pictQ_）
+// ---------------------------------------------------------------------------
+// 结构与 audioDecodeThread 几乎一样，只有两处差别值得说：
+//   ① 帧时长要靠帧率算（音频可以直接用 nb_samples/sample_rate）
+//   ② PTS 用容器时间基换算（音频在 M6 里已经被换算成"采样序号"了）
+void FFPlayer::videoDecodeThread()
+{
+    AVFramePtr frame = make_frame();
+
+    while (!abort_.load()) {
+        const int got = vidDec_.decodeFrame(frame.get());
+        if (got < 0) break;            // -1：被 abort
+        if (!got)  continue;           //  0：EOF
+
+        // 取可写槽位。pictQ_ 只有 3 个槽（M3 讲过为什么），满了会阻塞。
+        // ★ 这层背压对同步至关重要：它保证解码不会跑得远远超过显示。
+        //   否则队列里堆着几十帧，seek 时要清理的数据量、内存占用、
+        //   以及"图像滞后于声音"的时长都会失控。
+        Frame* slot = pictQ_.peekWritable();
+        if (!slot) break;              // 上游 abort
+
+        // 帧时长 = 1 / 帧率。frameRate_ 来自 av_guess_frame_rate，
+        // 某些流里可能是 0/0（没写帧率信息），所以必须做保护，
+        // 否则就是除零 —— 会得到 inf 或 nan 污染后面的比较。
+        const double duration = (frameRate_.num && frameRate_.den)
+                                    ? av_q2d(AVRational{frameRate_.den, frameRate_.num})
+                                    : 0.0;
+
+        // 视频 PTS：容器时间基 -> 秒
+        const double pts = (frame->pts == AV_NOPTS_VALUE)
+                               ? std::nan("") : frame->pts * av_q2d(videoTb_);
+
+        slot->pts      = pts;
+        slot->duration = duration;
+        slot->width    = frame->width;
+        slot->height   = frame->height;
+        slot->format   = frame->format;
+        av_frame_move_ref(slot->frame.get(), frame.get());
+        pictQ_.push();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// videoRefreshThread —— 视频刷新线程
+// ---------------------------------------------------------------------------
+// 【为什么视频需要一条专门的线程来做"到点显示"？】
+//   音频不需要 —— 声卡会主动来要数据，硬件在驱动我们。
+//   但显示器不会"来要画面"，所以必须由软件主动决定：
+//   "现在这一瞬间，该显示哪一帧？"
+//   这条线程就是在反复问这个问题。
+void FFPlayer::videoRefreshThread()
+{
+    while (!abort_.load()) {
+        // 每轮的睡眠时长交给 videoRefresh 决定，默认 10ms。
+        double remaining = kRefreshInterval;
+
+        videoRefresh(remaining);
+
+        if (remaining > 0.0)
+            av_usleep(static_cast<unsigned>(remaining * 1'000'000.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ★★★ videoRefresh —— 整个项目的同步核心 ★★★
+// ---------------------------------------------------------------------------
+// 它只回答一个问题：**下一帧到了该显示的时间吗？**
+//
+// 【三种可选方案，为什么选第二种】
+//   方案 A：让视频按自己的帧率播（定时器每 1/fps 秒显示一帧）。
+//          简单，但视频和音频各自为政 —— 声卡时钟与系统时钟有微小差异，
+//          长时间播放必然越差越多，表现为"越看越不对口型"。
+//   方案 B：音频驱动视频（★ 本项目采用）。视频只问"到点了吗"，
+//          基准是音频主时钟。因为人耳对声音断续敏感、对画面抖动宽容，
+//          所以让画面去适配声音是代价最小的方向。
+//   方案 C：外部时钟为主（纯系统时间）。适合纯音频或需要绝对时间同步的场景。
+//   ★ 本项目的组合是：有音频用音频主时钟；没音频就退化成
+//     "用视频 PTS 锚定的外部时钟"，两条路都通向同一个 audClk_。
+//
+// 【remainingTime 这个出参的妙处】
+//   10ms 不是"固定睡眠"，而是"睡眠上限"。如果下一帧还有 3ms 就该显示了，
+//   那就只睡 3ms —— 显示时机精度因此远好于 10ms。
+//   而如果还有 500ms 才到下一帧（低帧率、或 seek 之后），也只睡 10ms，
+//   因为必须定期回来看时钟和状态有没有变。
+//   **这个"按需缩短睡眠"的小机制，是这一整个模块里最精巧的一处设计。**
+void FFPlayer::videoRefresh(double& remainingTime)
+{
+    // ---- ★ 播放结束检测（M10 新增）----
+    //
+    // "播放结束" = 文件已读完（eof_）+ 所有缓冲都空了。
+    //   · 音频那两段：audioQ_（待解码的包）+ sampQ_（已解码待播放的帧）
+    //   · 视频那两段：videoQ_ + pictQ_
+    //
+    // 放在这里而不是 readThread，是因为只有这里在【持续按时间运行】，
+    // 能观察到"数据被慢慢消费光"这个过程。放在 readThread 的话，
+    // 它早就跑完退到循环里空转了，根本看不到后面的消费过程。
+    //
+    // 用 completedPosted_.exchange(true) 保证只投一次；
+    // seek 会把 eof_ 和 completedPosted_ 都复位，所以能重新发。
+    if (eof_.load() && !paused_.load()
+        && audioQ_.nbPackets() == 0 && videoQ_.nbPackets() == 0
+        && sampQ_.nbRemaining() == 0 && pictQ_.nbRemaining() == 0) {
+        if (!completedPosted_.exchange(true))
+            msgQ_.post(FFMsg::Completed);
+        return;
+    }
+
+    // 没有视频流，或者正在暂停 —— 什么都不做（暂停时时钟也被冻住了）
+    if (!videoSt_ || paused_.load())
+        return;
+    if (pictQ_.nbRemaining() == 0)
+        return;
+
+    Frame* vp = pictQ_.peek();
+
+    // ---- 特殊情况：帧没有时间戳 ----
+    // 无法参与同步，只能直接显示。真实流里少见，但存在（比如某些裸流）。
+    if (std::isnan(vp->pts)) {
+        if (videoCb_) videoCb_(*vp);
+        pictQ_.next();
+        return;
+    }
+
+    // ---- 取主时钟 ----
+    double master = audClk_.get();
+
+    // ---- 纯视频（没有音频流）的降级路径 ----
+    if (audioIdx_ < 0) {
+        // 没有音频来推进时钟，那就反过来：用视频自己的 PTS 去锚定它，
+        // 之后 get() 靠系统时间线性外推，就得到一个"外部时钟"。
+        //
+        // 什么时候需要重新锚定？三个条件：
+        //   ① !videoClockInit_      ：还没锚定过（播放刚开始）
+        //   ② isnan(master)         ：时钟是空的（M5 修好 NaN 语义后这条才有意义）
+        //   ③ vp->pts - master > 1.0：★ PTS 比时钟【前跳超过 1 秒】
+        //
+        // ★ 第 ③ 条是参考工程用来兜一个坑的启发式规则，值得单独说：
+        //     seek 之后 pictQ_.flush() 清空了队列，但解码线程手里可能
+        //     还攥着几帧旧数据，flush 之后又被 push 进来 —— 于是队列里
+        //     混进了 PTS 很旧的残留帧。如果第 ①/② 条恰好被这些残帧触发，
+        //     时钟就被锚回了旧位置（比如从 3.0 秒锚回 0.5 秒）。
+        //     等真正的新帧（PTS 3.0）到达时，它比时钟大了 2.5 秒，
+        //     第 ③ 条就会把它识别为"大幅前跳"，于是重新锚定、纠正回来。
+        //
+        //     这就是 M3 提到的"serial 机制最后一步没接"所留下的缺口，
+        //     工程用一个阈值启发式把它糊上了。正确做法是在渲染路径上
+        //     直接比较帧的 serial 与队列当前 serial（ffplay 的做法），
+        //     那才是精确的 —— 留到 M11 一起收尾。
+        if (!videoClockInit_ || std::isnan(master) || vp->pts - master > 1.0) {
+            audClk_.set(vp->pts);
+            videoClockInit_ = true;
+            master = vp->pts;
+        }
+    }
+
+    // ---- 核心比较：这一帧相对于主时钟是早了还是晚了 ----
+    const double diff = vp->pts - master;
+
+    if (diff > 0.0) {
+        // 还没到显示时间。把睡眠缩短到"刚好够等到这一帧"，
+        // 但不会超过本轮的默认上限（10ms）—— 因为还要定期回来检查状态。
+        remainingTime = std::min(remainingTime, diff);
+        return;
+    }
+
+    // ---- 已经到时间了（diff <= 0）----
+    //
+    // ★ M10 改进（参考工程没有这一段）：如果这一帧已经迟到太多，
+    //   说明解码/渲染跟不上播放速度了。此时【丢掉它】比【补显它】更好：
+    //     · 硬把它显示出来，只会让后面的帧也一起往后拖，越拖越远；
+    //     · 观众看到的是"慢放的画面 + 正常的声音"，比偶尔跳一下更难受。
+    //   阈值取 100ms（ffplay 的 AV_SYNC_THRESHOLD_MAX 也是这个量级）。
+    //
+    //   `pictQ_.nbRemaining() > 1` 是一个必要的护栏：只有当后面还有帧
+    //   可以显示时才允许丢。否则极端情况下会把所有帧都丢光，变成纯黑屏。
+    if (diff < -kLateDropThreshold && pictQ_.nbRemaining() > 1) {
+        statDroppedFrames_.fetch_add(1);
+        pictQ_.next();
+        return;
+    }
+
+    // ---- 到点了，交给上层显示 ----
+    // ⚠ 回调必须在返回前把数据拷走：下面这一行 next() 会立刻释放这个槽位。
+    if (videoCb_) videoCb_(*vp);
+    pictQ_.next();
 }

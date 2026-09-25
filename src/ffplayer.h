@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -83,6 +84,18 @@ public:
     // 未锚定时返回 0（而不是 NaN）—— 上层界面不需要知道 NaN 这个概念。
     double  positionSeconds() const;
 
+    // 设置视频帧回调。★ 这是 M10 新增的：内核决定"什么时候该显示哪一帧"，
+    // 拿到帧之后怎么用（转 QImage、贴到控件上）是上层的事。
+    //
+    // 【三条隐含契约，写错了会出很难查的问题】
+    //   ① 回调运行在 videoRefreshThread 里，不是主线程 —— 上层若碰 UI，
+    //      必须自己切线程（M12 用 Qt 的 QueuedConnection）。
+    //   ② 参数是 const Frame&，指向帧队列里的槽位；回调【返回之后】
+    //      videoRefresh 会立刻 pictQ_.next() 释放它。所以回调必须在返回前
+    //      把需要的数据拷走，不能存下这个引用。
+    //   ③ 回调必须尽快返回 —— 它阻塞的是刷新线程，慢一帧就整体慢一帧。
+    void setFrameCallback(std::function<void(const Frame&)> cb) { videoCb_ = std::move(cb); }
+
     // 总时长（毫秒）。未知返回 -1。
     int64_t durationMs() const;
 
@@ -91,6 +104,19 @@ public:
     // ---- 以下为【学习沙盒为可测试性加的】，最终工程里没有 ----
     PacketQueue& audioQueue() { return audioQ_; }
     PacketQueue& videoQueue() { return videoQ_; }
+    int droppedFrames() const { return statDroppedFrames_.load(); }
+
+    // 解复用分发的包数统计。★ 为什么需要它：
+    //   M8 时我们靠"队列里躺着多少条"来验证分发总量，那在【还没有消费者】
+    //   的时候成立。但 M9/M10 加了音频、视频解码线程后，队列只剩"流水线上
+    //   的一小段"，残留量随时序波动 —— 再也无法用来断言总量了。
+    //   用计数器则与时序无关，什么时候读都是准确的。
+    struct DemuxInfo {
+        int audioPkts = 0;   // 分发给音频队列的真实包数
+        int videoPkts = 0;
+        int nullPkts  = 0;   // EOF 空包投递次数（M6 修复的直接证据）
+    };
+    DemuxInfo demuxInfo() const;
 
     // 音频输出的统计量，用来验证"重采样确实产出了正确的声音数据"。
     struct AudioOutInfo {
@@ -108,6 +134,9 @@ private:
     void readThread();
     void handleSeekRequest();
     void audioDecodeThread();
+    void videoDecodeThread();               // M10：packet -> frame，入 pictQ_
+    void videoRefreshThread();              // M10：约 10ms 节拍的显示循环
+    void videoRefresh(double& remainingTime);   // M10：★ 同步比较的核心
 
     // 取一帧解码音频 -> swresample 重采样为 S16 -> 存进【自有缓冲】。
     // 返回本次可用的字节数；-1 表示暂时没有数据。
@@ -129,6 +158,13 @@ private:
     Clock        audClk_;           // ★ 音频主时钟：全项目的同步基准
     AudioDevice  audioDev_;
 
+    // ★ 视频帧回调（在 videoRefreshThread 里被调用）。见 setFrameCallback 的契约。
+    std::function<void(const Frame&)> videoCb_;
+    // 纯视频（无音频流）时，用来标记"外部时钟是否已用视频 PTS 锚定过"。
+    // 详见 .cpp 里 videoRefresh 的说明 —— 它是参考工程用来兜住
+    // "seek 后残留旧帧" 那个坑的启发式规则。
+    bool videoClockInit_ = false;
+
     // ---- 解复用 ----
     AVFormatContextPtr ic_;
     AVStream* audioSt_ = nullptr;
@@ -144,6 +180,8 @@ private:
     std::atomic<bool>    abort_{true};
     std::atomic<bool>    paused_{false};
     std::atomic<bool>    eof_{false};
+    // 播放结束（不是"读完"）是否已经通知过上层。见 videoRefresh 里的结束检测。
+    std::atomic<bool>    completedPosted_{false};
     std::atomic<int64_t> durationUs_{AV_NOPTS_VALUE};
 
     // ---- seek 请求（只在 readThread 里真正执行）----
@@ -172,6 +210,11 @@ private:
     int                statSwrRebuilds_   = 0;
     int64_t            statPcmBytes_      = 0;
     int                statPcmPeak_       = 0;
+    // 被丢弃的"迟到帧"数量（M10 新增的丢帧逻辑）。用 atomic 免得再占一把锁。
+    std::atomic<int>   statDroppedFrames_{0};
+    std::atomic<int>   statAudioPkts_{0};   // 分发给音频队列的真实包数
+    std::atomic<int>   statVideoPkts_{0};
+    std::atomic<int>   statNullPkts_{0};    // EOF 空包投递次数
 };
 
 #endif // FFPLAYER_H

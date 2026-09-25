@@ -372,3 +372,24 @@ target_link_libraries(test_ffplayer_audio PRIVATE
 vpl_apply_common_options(test_ffplayer_audio)
 vpl_copy_runtime_dlls(test_ffplayer_audio)
 vpl_copy_sdl3_dll(test_ffplayer_audio)
+
+# ===========================================================================
+# 16. M10 测试目标：视频链路 + 音视频同步
+# ===========================================================================
+add_executable(test_ffplayer_video
+    tests/test_ffplayer_video.cpp
+    src/ffplayer.cpp
+    src/audiodevice.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+    src/message_queue.cpp
+)
+target_include_directories(test_ffplayer_video PRIVATE src)
+target_link_libraries(test_ffplayer_video PRIVATE
+    SDL3::SDL3
+    vpl_ffmpeg
+)
+vpl_apply_common_options(test_ffplayer_video)
+vpl_copy_runtime_dlls(test_ffplayer_video)
+vpl_copy_sdl3_dll(test_ffplayer_video)
