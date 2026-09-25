@@ -135,6 +135,7 @@ static void testVideoDecode(const std::string& path)
 
     // 空 worker：我们不走"独立解码线程"，而是在主线程手动驱动 decodeFrame，
     // 这样能精确控制时序、方便统计。start() 只是帮我们把队列启动起来。
+    vq.start();                 // ★ 调用契约：先启动队列
     dec.start(vq, [] {});
 
     std::vector<int64_t> pktPtsList;
@@ -284,6 +285,7 @@ static void testAudioDecode(const std::string& path)
     std::printf("        pkt_timebase = %d/%d（我们显式设成了 stream->time_base）\n",
                 c->pkt_timebase.num, c->pkt_timebase.den);
 
+    aq.start();                 // ★ 调用契约：先启动队列
     dec.start(aq, [] {});
 
     AVPacketPtr pkt = make_packet();
@@ -371,6 +373,7 @@ static void testThreadedUsage(const std::string& path)
     // 这一次把"完整的主循环"传给 start —— 也就是 FFPlayer 将来会做的事：
     // 解码 → 取帧队列空槽 → 填 → push。
     AVFramePtr frame = make_frame();
+    vq.start();                 // ★ 调用契约：先启动队列
     dec.start(vq, [&] {
         while (true) {
             const int r = dec.decodeFrame(frame.get());

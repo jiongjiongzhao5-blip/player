@@ -188,6 +188,7 @@ int main(int argc, char* argv[])
     PacketQueue vq;
     Decoder dec;
     dec.open(ic->streams[vIdx]);
+    vq.start();                 // ★ 调用契约：先启动队列
     dec.start(vq, [] {});
 
     AVPacket* pkt = av_packet_alloc();

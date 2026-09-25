@@ -257,7 +257,7 @@ vpl_copy_runtime_dlls(test_decoder)
 #   最土但最稳，也顺便让你看清"导入一个预编译库"到底需要哪几样东西：
 #     ① 头文件目录  ② 链接用的 .lib  ③ 运行时用的 .dll
 # ---------------------------------------------------------------------------
-set(SDL3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3"
+set(SDL3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/SDL3"
     CACHE PATH "SDL3 开发包根目录")
 
 # 按目标架构挑库目录。MSVC 在 ARM64 上不会定义 CMAKE_SIZEOF_VOID_P，
@@ -325,3 +325,21 @@ target_link_libraries(test_audiodevice PRIVATE
 vpl_apply_common_options(test_audiodevice)
 vpl_copy_runtime_dlls(test_audiodevice)
 vpl_copy_sdl3_dll(test_audiodevice)
+
+# ===========================================================================
+# 14. M8 测试目标：FFPlayer 解复用阶段
+# ===========================================================================
+# ffplayer.cpp 依赖：decoder / packet_queue / frame_queue / message_queue
+# （SDL3 要到 M9 才有音频输出，所以这一轮还不用链接它）
+add_executable(test_ffplayer
+    tests/test_ffplayer_demux.cpp
+    src/ffplayer.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+    src/message_queue.cpp
+)
+target_include_directories(test_ffplayer PRIVATE src)
+target_link_libraries(test_ffplayer PRIVATE vpl_ffmpeg)
+vpl_apply_common_options(test_ffplayer)
+vpl_copy_runtime_dlls(test_ffplayer)

@@ -55,6 +55,11 @@ public:
 
     // 绑定包队列并启动解码工作线程。
     //
+    // ★ 调用契约：调用本方法【之前】必须先 queue.start()。
+    //   原因见 .cpp 里的详细说明（队列的生死不该绑在 Decoder 上，
+    //   而且 PacketQueue::start() 不幂等）。FFPlayer 在 openComponent
+    //   里启动队列。
+    //
     // worker 是一个 std::function<void()> —— 也就是"解码线程的主体函数"。
     // 为什么不把主循环直接写进 Decoder？
     //   因为主循环里要做的事（算 pts、算 duration、往哪个 FrameQueue 写）
