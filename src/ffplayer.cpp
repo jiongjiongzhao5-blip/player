@@ -1,10 +1,23 @@
 #include "ffplayer.h"
 
+#include <algorithm>
+#include <cstring>
+
 // ============================================================================
-// ffplayer.cpp —— 播放器内核（M8：解复用与流打开）
+// ffplayer.cpp —— 播放器内核（M9：音频链路 + 音频主时钟）
 // ============================================================================
 
-FFPlayer::FFPlayer() = default;
+namespace {
+// 队列容量（与 ffplay 保持一致）
+constexpr int kVideoQueueSize  = 3;    // 视频帧队列只开 3 个槽（M3 讲过原因）
+constexpr int kSampleQueueSize = 9;    // 音频帧小，可以多囤一点
+}  // namespace
+
+FFPlayer::FFPlayer()
+    : sampQ_(kSampleQueueSize)
+    , pictQ_(kVideoQueueSize)
+{
+}
 
 FFPlayer::~FFPlayer()
 {
@@ -18,54 +31,80 @@ int FFPlayer::prepare(const std::string& url)
 {
     url_    = url;
     abort_  = false;
+    paused_ = false;
     eof_    = false;
     durationUs_ = AV_NOPTS_VALUE;
 
-    // 启动消息队列。注意：MessageQueue 默认是终止态（M4 讲的），
-    // 不 start 的话所有 post 都会被静默丢弃 —— 上层就永远收不到事件。
+    // ★ 把帧队列和它上游的包队列"绑"起来。
+    //
+    //   为什么要绑？因为 FrameQueue 在"没有空槽可写 / 没有数据可读"时会阻塞，
+    //   而它必须能被 abort 唤醒。绑上以后，它的等待条件里就多了一条
+    //   "上游包队列已终止"，一次 abort 就能把整条流水线上的线程全叫醒。
+    //   （M3 实验台 [6] 专门验证过这个"两步唤醒"机制。）
+    sampQ_.setPacketQueue(&audioQ_);
+    pictQ_.setPacketQueue(&videoQ_);
+
+    audClk_.init();                 // 时钟复位成 NaN（未锚定状态）
     msgQ_.start();
 
     readThr_ = std::thread(&FFPlayer::readThread, this);
 
-    // 这里【没有】等待文件打开完成。原因见头文件里的说明：
-    // 打开文件可能阻塞很久，让它留在 readThread 里，UI 才不会被卡住。
-    // 成败通过 msgQ_ 的 Prepared / Error 通知。
+    // 注意这里【没有】等音频设备打开、也没等解码线程起来 ——
+    // 那些都在 readThread → openComponent 里做（异步）。
+    // 上层靠 Prepared 消息判断"可以开始播了"。
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// close —— 生命周期里唯一"顺序敏感"的函数
+// close —— 优雅停机（顺序敏感）
 // ---------------------------------------------------------------------------
-// 顺序为什么重要？因为我们要在销毁对象【之前】让所有依赖它们的线程停下来。
-// 一旦有一个线程还活着并访问了已释放的成员，就是 use-after-free。
-//
-// 本阶段的顺序（M9/M10 还会往中间插入更多步骤）：
-//   ① 置 abort_ 标志 + 唤醒所有阻塞点
-//   ② join 线程（等它们真正结束）
-//   ③ 清空队列、释放 FFmpeg 资源
-//
-// 注意 ① 和 ② 之间不能颠倒：只置标志不 join，线程可能还在跑；
-// 先 join 不置标志，线程可能永远阻塞在 get() 上 —— 死等。
+// 顺序的道理只有一句话：**先让所有可能阻塞的点都能被唤醒，再逐个关闭
+// 输出通道，最后 join 线程。** 反过来做（比如先 join 再 abort），
+// 线程可能永远阻塞在某个 get() 上，join 就变成死等。
 void FFPlayer::close()
 {
-    // ① 置终止标志，并唤醒所有可能阻塞的地方。
     abort_ = true;
-    msgQ_.abort();       // 唤醒阻塞在 messages().get() 的上层事件线程
-    audioQ_.abort();     // 唤醒阻塞在 audioQ_.get() 的解码线程（M9 会有）
-    videoQ_.abort();     // 同上，视频侧（M10）
 
-    // ② 等线程真正结束
-    if (readThr_.joinable())
-        readThr_.join();
+    // ① 唤醒所有阻塞点
+    msgQ_.abort();
+    audioQ_.abort();
+    videoQ_.abort();
+    sampQ_.signal();        // 叫醒睡在音频帧队列上的线程（M3 讲的"第二步"）
+    pictQ_.signal();
 
-    // ③ 清空队列、释放资源
+    // ② 先关音频设备。
+    //    ★ 这一步必须在 join 解码线程【之前】做。
+    //      SDL_DestroyAudioStream 会同步等待音频回调退出，所以返回之后
+    //      pullAudio() 一定不会再被调用。如果不先关它，那个回调可能正
+    //      阻塞在 sampQ_.peekReadable() 上 —— 虽然我们 signal 过，
+    //      但让"已经没人会再进来"变成确定事实，比推理它更可靠。
+    audioDev_.close();
+
+    // ③ join 线程
+    if (readThr_.joinable())    readThr_.join();
+    if (refreshThr_.joinable()) refreshThr_.join();
+
+    // ④ 停解码器（内部会 abort 队列 + signal 帧队列 + join 解码线程）
+    audDec_.abort(sampQ_);
+    vidDec_.abort(pictQ_);
+
+    // ⑤ 清队列、释放 FFmpeg 资源
     audioQ_.flush();
     videoQ_.flush();
-    ic_.reset();                       // RAII：自动 avformat_close_input
+    sampQ_.flush();
+    pictQ_.flush();
+
+    ic_.reset();
+    swr_.reset();
+    av_channel_layout_uninit(&srcLayout_);
+    av_channel_layout_uninit(&tgtLayout_);
 
     audioSt_ = videoSt_ = nullptr;
     audioIdx_ = videoIdx_ = -1;
-    durationUs_ = AV_NOPTS_VALUE;
+    audioBuf_ = nullptr;
+    audioBufSize_ = audioBufIndex_ = 0;
+    audioClock_ = std::nan("");
+    resampleBuf_.clear();
     eof_ = false;
 }
 
@@ -76,15 +115,53 @@ void FFPlayer::seekMs(int64_t ms)
 {
     std::lock_guard<std::mutex> lock(ctlMtx_);
     seekReq_   = true;
-    // 统一换算成微秒（AV_TIME_BASE 单位）。
-    // av_seek_frame 要求时间戳以 AV_TIME_BASE 为单位，且当 stream_index 传 -1
-    // 时这个单位是强制的 —— 所以要显式换算，不能直接传毫秒。
     seekPosUs_ = av_rescale(ms, AV_TIME_BASE, 1000);
 }
 
 // ---------------------------------------------------------------------------
-// durationMs
+// 播放控制
 // ---------------------------------------------------------------------------
+
+// ★ 这个函数里有一处容易被忽略、但直接决定"暂停久了会不会不同步"的处理。
+void FFPlayer::setPaused(bool paused)
+{
+    paused_ = paused;
+    audioDev_.setPaused(paused);        // 让声卡停/走
+
+    // ★ 时钟必须跟着一起冻结/恢复。
+    //
+    //   参考工程写的是：
+    //       if (!paused && !std::isnan(audioClock_))
+    //           audClk_.set(audioClock_);
+    //   只处理了"恢复时重锚定"，没有处理"暂停时冻结" —— 于是：
+    //     · 暂停期间没人调 set()，而 get() 靠系统时间外推，
+    //       位置会继续往前涨（实测暂停 600ms，位置涨了 601ms）；
+    //     · 恢复时又用 audioClock_（最后一帧的 PTS，比真实播放头还靠前）
+    //       重新锚定，于是位置"跳回去"一截。
+    //   两个 bug 合起来的表现就是：暂停时进度条还在跑，一恢复又倒退。
+    //
+    //   M9 的修法是把这两件事都收进 Clock::setPaused()：
+    //   暂停时 get() 直接返回冻结值，恢复时以冻结值为基准重新锚定。
+    //   一次调用，语义完整。
+    audClk_.setPaused(paused);
+}
+
+// 音量：界面上的 0~100 在 M12 换算成 0.0~1.0 传进来。
+// 校验交给 AudioDevice（内部有 std::clamp）。
+void FFPlayer::setVolume(float linear01) { audioDev_.setVolume(linear01); }
+
+// 倍速：注意这里【只调了 AudioDevice】，没有调 audClk_.setSpeed()。
+// 这是参考工程遗留的一处"没接线"——详见 .cpp 文件末尾的说明。
+void FFPlayer::setSpeed(float ratio) { audioDev_.setSpeed(ratio); }
+
+double FFPlayer::positionSeconds() const
+{
+    const double c = audClk_.get();
+    // 未锚定时 get() 返回 NaN，这里统一成 0 ——
+    // 界面层不需要知道 NaN 这个概念，它只知道"位置是 0"。
+    return std::isnan(c) ? 0.0 : std::max(0.0, c);
+}
+
 int64_t FFPlayer::durationMs() const
 {
     const int64_t us = durationUs_.load();
@@ -92,118 +169,110 @@ int64_t FFPlayer::durationMs() const
 }
 
 // ---------------------------------------------------------------------------
-// handleSeekRequest —— 由 readThread 调用，真正执行跳转
+// 沙盒统计
 // ---------------------------------------------------------------------------
-// 为什么这个函数放在 readThread 里执行而不是直接在 seekMs 里做？
-//   av_seek_frame 和 av_read_frame 共享 AVFormatContext 的内部状态
-//（读缓冲、当前位置、索引），跨线程并发调用是未定义行为。
-//   让 seek 也由读线程串行执行，就天然避免了竞争，连锁都不用加。
-//   这是"单线程串行化"这个老套但极其有效的并发设计手法：
-//   **与其给共享状态加锁，不如规定只有一条线程能碰它。**
+FFPlayer::AudioOutInfo FFPlayer::audioOutInfo() const
+{
+    std::lock_guard<std::mutex> lock(statMtx_);
+    AudioOutInfo info;
+    info.targetSampleRate = audioDev_.sampleRate();
+    info.targetChannels   = audioDev_.channels();
+    info.decodedFrames    = statDecodedFrames_;
+    info.swrRebuilds      = statSwrRebuilds_;
+    info.pcmBytes         = statPcmBytes_;
+    info.pcmPeak          = statPcmPeak_;
+    return info;
+}
+
+// ---------------------------------------------------------------------------
+// handleSeekRequest —— 由 readThread 执行（M8 已讲）
+// ---------------------------------------------------------------------------
 void FFPlayer::handleSeekRequest()
 {
     {
         std::lock_guard<std::mutex> lock(ctlMtx_);
         if (!seekReq_)
             return;
-        seekReq_ = false;              // 取走请求，避免重复执行
+        seekReq_ = false;
     }
 
     const int64_t target = seekPosUs_;
-
-    // AVSEEK_FLAG_BACKWARD：如果目标位置不是关键帧，往前找最近的关键帧。
-    // 为什么必须往前？因为从关键帧开始才能正确解码 —— 中间帧依赖前面的参考帧。
-    // 代价是实际落点通常比目标略靠前（我们的素材 GOP=12 帧=480ms，
-    // 所以 seek 到 2000ms 会落到 1920ms 那个关键帧）。
     if (av_seek_frame(ic_.get(), -1, target, AVSEEK_FLAG_BACKWARD) < 0)
         return;
 
-    // ★ 清空缓存并放入 flush 标记（serial +1）。
-    //
-    //   reset() 做两件事：
-    //     ① 清空队列里所有还没被消费的旧包 —— 它们属于 seek 之前的位置；
-    //     ② 压入一个 flush 标记，让解码线程知道"到边界了，
-    //        请把解码器内部缓存也刷掉"（M6 讲过解码器有内部延迟）。
-    //
-    //   如果不做这一步，seek 之后你会先看到几帧"跳回去"的旧画面，
-    //   然后才跳到新位置 —— 这是 seek 实现最常见的 bug。
     audioQ_.reset();
     videoQ_.reset();
-
-    eof_ = false;                      // 跳走之后就不是 EOF 状态了
+    sampQ_.flush();
+    pictQ_.flush();
+    eof_ = false;
 }
 
 // ---------------------------------------------------------------------------
-// openComponent —— 打开一路流（解码器 + 记录元信息 + 启动对应队列）
+// openComponent —— 打开一路流
 // ---------------------------------------------------------------------------
-// M9 会在这里追加：音频输出设备初始化 + 启动音频解码线程
-// M10 会在这里追加：启动视频解码线程
 int FFPlayer::openComponent(AVStream* stream, AVMediaType type)
 {
-    // 音频走 audDec_，视频走 vidDec_ —— 用指针选一下，避免写两份重复代码
     Decoder* dec = (type == AVMEDIA_TYPE_AUDIO) ? &audDec_ : &vidDec_;
 
     const int ret = dec->open(stream);
     if (ret < 0)
-        return ret;                    // 打不开解码器，交给调用方决定怎么报错
+        return ret;
 
-    // ★ 启动这一路对应的包队列。
-    //
-    //   为什么必须在这里做？因为 PacketQueue 默认是【终止态】（M3 讲的），
-    //   start() 之前所有 put() 都会被静默丢弃。
-    //
-    //   参考工程把 start() 藏在 Decoder::start() 里，结果 M8 阶段
-    //   （还没有解码线程）实测撞出：队列里 0 个包、serial 还是 0，
-    //   readThread 投进来的一切都被无声吃掉。
-    //   修正是把"队列的启动"归还给创建它的 FFPlayer。
-    //
-    //   注意执行顺序：先 dec->open() 成功、再 start() 队列。
-    //   反过来的话，如果解码器打不开，队列却已经启动、
-    //   readThread 会往里灌包而没人消费 → 触发背压把读线程卡住。
     if (type == AVMEDIA_TYPE_AUDIO) {
+        AVCodecContext* c = audDec_.ctx();
+
+        // ★ 确定"输出格式"：本项目固定为 ——
+        //     采样率 = 源采样率、声道布局 = 源布局、采样格式 = S16（交织）
+        //   也就是"除了采样格式，其余尽量不动"。
+        //   为什么不统一重采样到 48kHz？因为那会引入一次不必要的质量损失
+        //   和 CPU 开销。声卡对 44.1k 和 48k 都能直接播，保持源采样率最省事。
+        tgtFreq_ = c->sample_rate;
+        av_channel_layout_uninit(&tgtLayout_);
+        av_channel_layout_copy(&tgtLayout_, &c->ch_layout);
+
+        // ★ 打开 SDL 音频设备，并把"拉数据"的回调接到 pullAudio 上。
+        //   注意这里传的是 lambda，捕获 this —— 回调里会调 FFPlayer 的成员。
+        //   生命周期上这是安全的：close() 里先 audioDev_.close() 再销毁对象，
+        //   而且 close() 会等回调彻底退出。
+        if (!audioDev_.open(tgtFreq_, tgtLayout_.nb_channels,
+                            [this](uint8_t* d, int b) { return pullAudio(d, b); }))
+            return -1;              // 设备打不开 → 这一路算失败
+
         audioSt_  = stream;
         audioIdx_ = stream->index;
-        audioQ_.start();
+        audioQ_.start();            // ★ 队列的启动归 FFPlayer（M8 的修正）
+
+        // 启动音频解码线程。主循环体由这里提供（"策略注入"）。
+        // 前提：audioQ_ 已经 start 过。
+        audDec_.start(audioQ_, [this] { audioDecodeThread(); });
+
     } else {
         videoSt_   = stream;
         videoIdx_  = stream->index;
         videoTb_   = stream->time_base;
-        // av_guess_frame_rate 会综合容器声明的帧率和码流里的时基信息
-        // 给出最靠谱的帧率 —— 比直接读 stream->avg_frame_rate 稳（有些
-        // 容器这两个字段不一致，甚至一个是 0/0）。
         frameRate_ = av_guess_frame_rate(ic_.get(), stream, nullptr);
         videoQ_.start();
+        // M10 会在这里启动视频解码线程
     }
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// readThread —— 解复用主循环
+// readThread —— 解复用主循环（M8 已实现，这里保持原样）
 // ---------------------------------------------------------------------------
-// 这是本模块最核心的一段：把文件拆成压缩包，按流分发到两个队列。
-// 它同时兼任三件事：打开文件、分发数据、串行处理 seek 请求。
 void FFPlayer::readThread()
 {
-    // ---- 阶段 1：打开输入 ----
-    // 注意这里必须传裸指针的地址（二级指针）—— avformat_open_input 要先
-    // 分配 AVFormatContext 再交给我们，所以不能用已经分配好的对象。
-    // 拿到之后立刻交给 RAII 托管（ic_.reset(raw)），后面就不用管释放了。
     AVFormatContext* raw = nullptr;
     int ret = avformat_open_input(&raw, url_.c_str(), nullptr, nullptr);
     if (ret < 0) {
         av_log(nullptr, AV_LOG_ERROR, "open input failed: %s\n",
                av_err_string(ret).c_str());
         msgQ_.post(FFMsg::Error, ret);
-        return;                        // 线程就此结束；上层会收到 Error
+        return;
     }
     ic_.reset(raw);
     msgQ_.post(FFMsg::OpenInput);
 
-    // ---- 阶段 2：探测流信息 ----
-    // avformat_open_input 只读了文件头，还不知道每个流的编码参数
-    //（H.264 的 SPS/PPS、AAC 的 AudioSpecificConfig 等）。
-    // find_stream_info 会真的去读一段数据来把参数补齐 —— 这是必须的一步，
-    // 否则后面 avcodec_open2 会失败。
     ret = avformat_find_stream_info(ic_.get(), nullptr);
     if (ret < 0) {
         av_log(nullptr, AV_LOG_WARNING, "find_stream_info: %s\n",
@@ -216,52 +285,14 @@ void FFPlayer::readThread()
     if (ic_->duration != AV_NOPTS_VALUE)
         durationUs_.store(ic_->duration);
 
-    // ---- 阶段 3：找音视频流并打开解码器 ----
-    //
-    // ★★ M8 修掉的一个真 bug（参考工程这里参数传错了位置）★★
-    //
-    //   av_find_best_stream 的签名是：
-    //       (ic, type, wanted_stream_nb, related_stream, decoder_ret, flags)
-    //                    ↑ 第3个           ↑ 第4个
-    //
-    //   参考工程写的是：
-    //       av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO,
-    //                           videoIdx >= 0 ? videoIdx : -1,  -1, ...)
-    //                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^   ^^
-    //                           这个位置是 wanted_stream_nb      这个才是 related_stream
-    //   也就是把 videoIdx 传给了 【wanted_stream_nb】，含义变成了
-    //   "我要索引为 videoIdx 的那条音频流"。
-    //
-    //   而最常见的 mp4 布局是 视频=#0、音频=#1，于是它在找"索引为 0 的音频流"
-    //   —— 索引 0 是视频流，自然找不到，返回 AVERROR_STREAM_NOT_FOUND。
-    //
-    //   实测证据（用同参数直接调 API）：
-    //       wanted=-1  related=-1  -> 找到流 #1
-    //       wanted=0   related=-1  -> 失败 (-1381258232 Stream not found)  ← 工程传法
-    //       wanted=-1  related=0   -> 找到流 #1
-    //
-    //   后果非常隐蔽：audioIdx 为负 → 音频那一路 openComponent 根本不会被调用
-    //   → 音频队列一直是终止态 → 所有音频包被静默丢弃 → **播放器完全没有声音，
-    //   而且不报任何错**。这正是 M8 实验里"音频队列 0 个包、serial=0"的根源。
-    //
-    //   修法：wanted_stream_nb 传 -1（表示自动选择），把 videoIdx 放到
-    //   related_stream 上（表达作者本来的意图：优先找与该视频同属一个
-    //   节目的音轨；没有 program 信息时它会优雅回退到自动选择）。
+    // ★ 这里修掉了参考工程的一个真 bug：第 3 个参数是 wanted_stream_nb、
+    //   第 4 个才是 related_stream，参考工程把 videoIdx 传错了位置，
+    //   导致音频流永远找不到（详见 M8 的说明）。
     const int videoIdx = av_find_best_stream(ic_.get(), AVMEDIA_TYPE_VIDEO,
                                              -1, -1, nullptr, 0);
     const int audioIdx = av_find_best_stream(ic_.get(), AVMEDIA_TYPE_AUDIO,
                                              -1, videoIdx, nullptr, 0);
 
-    // ★ M8 修正：检查 openComponent 的返回值。
-    //
-    //   参考工程直接忽略了这个返回值 —— 于是"解码器打不开"这件事
-    //   会被完全吞掉：上层收到 Prepared 以为一切正常，结果那一路
-    //   永远没有画面/声音，也不报错。
-    //
-    //   这里的策略是分级的：
-    //     · 两路都打不开          -> 致命，post Error 并终止
-    //     · 只有一路打不开        -> 打条警告日志，用另一路继续播
-    //       （视频能放就放视频、音频能放就放音频，比整个失败更有用）
     int audioOpenErr = 0, videoOpenErr = 0;
     if (audioIdx >= 0)
         audioOpenErr = openComponent(ic_->streams[audioIdx], AVMEDIA_TYPE_AUDIO);
@@ -276,72 +307,318 @@ void FFPlayer::readThread()
     const bool audioUsable = (audioIdx >= 0) && (audioOpenErr == 0);
     const bool videoUsable = (videoIdx >= 0) && (videoOpenErr == 0);
     if (!audioUsable && !videoUsable) {
-        // 两路都不行 —— 报第一路遇到的错误
         msgQ_.post(FFMsg::Error, audioOpenErr != 0 ? audioOpenErr : videoOpenErr);
         return;
     }
     if (audioOpenErr != 0 || videoOpenErr != 0) {
         av_log(nullptr, AV_LOG_WARNING,
-               "有一路解码器打开失败（audio=%d video=%d），将只播放另一路\n",
+               "有一路打不开（audio=%d video=%d），将只播放另一路\n",
                audioOpenErr, videoOpenErr);
     }
-    msgQ_.post(FFMsg::Prepared);       // ★ 到这里才算"准备好了"
+    msgQ_.post(FFMsg::Prepared);
 
-    // ---- 阶段 4：分发循环 ----
+    // ---- 分发循环 ----
     AVPacketPtr pkt = make_packet();
     while (!abort_.load()) {
-        handleSeekRequest();           // 每次都先看看有没有待处理的 seek
+        handleSeekRequest();
 
         ret = av_read_frame(ic_.get(), pkt.get());
         if (ret < 0) {
-            // 读到结尾（或出错）
             if (ret == AVERROR_EOF || avio_feof(ic_->pb)) {
-                // ★★ 这是 M6 发现并修复的那个缺陷 ★★
-                //
-                //   原来的实现只 post 一条 Completed 就 continue 了，从不给
-                //   队列投"结束信号"。后果（M6 实验台实测）：
-                //     · 解码器永远不会进入 draining 模式，尾部约 2 帧画面
-                //       永远不显示；
-                //     · Decoder::decodeFrame 里的 AVERROR_EOF 分支永远走不到；
-                //     · 解码线程会一直阻塞在 queue_->get() 直到 abort。
-                //
-                //   修复：给两路队列各投一个"空包"（size==0、data==nullptr）。
-                //   avcodec_send_packet 收到 size==0 的包 = "没有更多输入了"，
-                //   解码器随即进入 draining，把内部缓存的帧全部吐出来。
-                //
-                //   用 eof_.exchange(true) 保证只投一次 —— 否则下面那个
-                //   continue 会让我们每 10ms 就再投一个空包。
+                // ★ EOF 时给两路各投一个"空包"当结束信号（M6 发现、M8 修复）
                 if (!eof_.exchange(true)) {
                     if (audioIdx_ >= 0) audioQ_.putNullPacket(audioIdx_);
                     if (videoIdx_ >= 0) videoQ_.putNullPacket(videoIdx_);
                     msgQ_.post(FFMsg::Completed);
                 }
             }
-            // pb->error 非零说明是真的 IO 错误（不是正常读完），直接退出循环。
             if (ic_->pb && ic_->pb->error)
                 break;
-
-            // 【一个可以改进的点】EOF 之后这里会以 10ms 周期空转，直到
-            // abort。为什么不直接 break 退出？
-            //   因为 seek 之后我们要能继续读 —— 所以循环必须活着来响应
-            //   seek 请求。10ms 一次的开销极小（约 100 次/秒的空循环），
-            //   但更优雅的写法是"阻塞在一个条件变量上，等 seekMs 来唤醒"。
-            //   当前实现选择简单，代价是 EOF 后有一点无谓的空转。
             av_usleep(10 * 1000);
             continue;
         }
-
-        // 读到了新包，说明不在 EOF 状态了
         eof_ = false;
 
-        // ---- 按流分发 ----
-        // 只保留音视频两路，其余（字幕、数据流等）直接丢弃。
-        // put() 内部会 av_packet_move_ref 转移所有权，所以不需要我们再 unref。
         if (pkt->stream_index == audioIdx_)
             audioQ_.put(pkt.get());
         else if (pkt->stream_index == videoIdx_)
             videoQ_.put(pkt.get());
         else
-            av_packet_unref(pkt.get());   // 丢弃：必须显式 unref 才不会泄漏
+            av_packet_unref(pkt.get());
     }
+}
+
+// ---------------------------------------------------------------------------
+// audioDecodeThread —— 音频解码线程：packet -> frame（入 sampQ_）
+// ---------------------------------------------------------------------------
+void FFPlayer::audioDecodeThread()
+{
+    AVFramePtr frame = make_frame();
+
+    while (!abort_.load()) {
+        const int got = audDec_.decodeFrame(frame.get());
+        if (got < 0) break;            // -1：被 abort
+        if (!got)  continue;           //  0：EOF（解码器已排空）
+
+        // 取一个可写槽位。队列满时这里会阻塞 ——
+        // 这是个天然的背压：解码不会跑得比消费快太多。
+        Frame* slot = sampQ_.peekWritable();
+        if (!slot) break;              // 上游 abort
+
+        // ★ 算 PTS。注意时间基是 1/sample_rate ——
+        //   这正是 M6 里 Decoder::decodeFrame 对音频做的换算：
+        //   它把 pts 转成了"采样序号"。所以我们再乘 1/sample_rate 就得到秒。
+        const AVRational tb{1, frame->sample_rate};
+        slot->pts = (frame->pts == AV_NOPTS_VALUE)
+                        ? std::nan("")
+                        : frame->pts * av_q2d(tb);
+
+        // 帧时长 = 采样数 / 采样率（音频帧的长度是精确已知的，不像视频要看帧率）
+        slot->duration = static_cast<double>(frame->nb_samples) / frame->sample_rate;
+        slot->format   = frame->format;   // 这里存的是 AVSampleFormat
+
+        // ★ move_ref 而不是拷贝：把解码帧的数据"搬"进队列槽位，
+        //   避免一次几 KB 的 memcpy。槽位里的 AVFrame 对象是复用的（M3 讲过）。
+        av_frame_move_ref(slot->frame.get(), frame.get());
+        sampQ_.push();
+
+        std::lock_guard<std::mutex> lock(statMtx_);
+        ++statDecodedFrames_;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ★ decodeOneAudioFrame —— 本模块最核心的一段：重采样
+// ---------------------------------------------------------------------------
+// 它要解决的矛盾是：
+//   解码器给出的格式是【不确定的】——AAC 通常是 FLTP（32 位浮点、分平面），
+//   也可能是 S16P、可能是 5.1 声道、可能是 44100 或 48000Hz；
+//   而声卡的格式是【我们定死的】——S16 交织。
+// 中间就必须有一个转换器，这就是 libswresample。
+//
+// 【为什么不用 SDL 的 AudioStream 做转换？】
+//   SDL3 的 AudioStream 其实也能做格式转换，但我们没有把源格式告诉它 ——
+//   它只被配置成"S16 的队列 + 输出"。这是刻意的分工：
+//     · swresample 负责【格式/采样率转换】（专业、可控、质量高）
+//     · SDL AudioStream 只负责【缓冲 + 送声卡】
+//   好处是转换逻辑集中在一处，将来要加 dither、改重采样质量都只改这里。
+// ---------------------------------------------------------------------------
+int FFPlayer::decodeOneAudioFrame()
+{
+    // ① 从帧队列取一帧（阻塞等待）。
+    //
+    //   ★ 但在【文件已经读完】的情况下不能阻塞 —— 那时解码线程已经退出，
+    //     队列永远是空的，peekReadable() 会一直睡下去，把 SDL 的音频回调
+    //     彻底卡住（表现为播完之后声卡不再被喂数据，可能出杂音或卡住）。
+    //     所以先判断"已到 EOF 且队列已空"，直接告诉调用方"没数据了"，
+    //     让 AudioDevice 去补静音 —— 播放就能安静、干净地收尾。
+    if (eof_.load() && sampQ_.nbRemaining() == 0)
+        return -1;
+
+    Frame* af = sampQ_.peekReadable();
+    if (!af)
+        return -1;
+
+    AVFrame* f = af->frame.get();
+    const auto inFmt = static_cast<AVSampleFormat>(f->format);
+
+    // ② 源参数变化时（重新）建立重采样器。
+    //
+    //    为什么要检查？因为同一个流里参数可能中途改变（切换码流、
+    //    广告插播等）。判断四项：采样格式、采样率、声道布局，以及
+    //    swr 是否还不存在。
+    //
+    //    ⚠ 注意这里【没有】比较目标参数，因为目标参数在设备打开时就定死了。
+    //      如果流中途从 44100 变成 48000，swr 会把新的 48000 转成
+    //      设备要的 44100 —— 这是正确的处理方式（设备规格不能中途改）。
+    //
+    //    这是本函数的性能关键点：swr_init 不便宜，绝不能逐帧调用。
+    //    正常情况下整个播放过程只会重建 1 次（首次）。
+    if (!swr_ || inFmt != srcFmt_ || f->sample_rate != srcFreq_ ||
+        av_channel_layout_compare(&f->ch_layout, &srcLayout_) != 0) {
+
+        swr_.reset();
+        SwrContext* rawSwr = nullptr;
+
+        // ★ FFmpeg 7+ 的新 API：swr_alloc_set_opts2（接收 AVChannelLayout*）
+        //   老 API swr_alloc_set_opts() 接收裸的 channel_layout 整数，
+        //   在 FFmpeg 7 已被移除 —— 这也是我们把版本闸门定在 7+ 的原因之一。
+        //
+        //   参数顺序：out_ch_layout, out_sample_fmt, out_sample_rate,
+        //             in_ch_layout,  in_sample_fmt,  in_sample_rate
+        const int r = swr_alloc_set_opts2(&rawSwr,
+                                          &tgtLayout_, AV_SAMPLE_FMT_S16, tgtFreq_,
+                                          &f->ch_layout, inFmt, f->sample_rate,
+                                          0, nullptr);
+        if (r < 0 || !rawSwr || swr_init(rawSwr) < 0) {
+            av_log(nullptr, AV_LOG_ERROR, "swr init failed: %s\n",
+                   av_err_string(r).c_str());
+            if (rawSwr) swr_free(&rawSwr);
+            // ★ 失败也要 next()：否则永远卡在这一帧上，死循环。
+            //   丢弃一帧音频的听感损失远小于卡死。
+            sampQ_.next();
+            return -1;
+        }
+        swr_.reset(rawSwr);
+        av_channel_layout_uninit(&srcLayout_);
+        av_channel_layout_copy(&srcLayout_, &f->ch_layout);
+        srcFreq_ = f->sample_rate;
+        srcFmt_  = inFmt;
+
+        std::lock_guard<std::mutex> lock(statMtx_);
+        ++statSwrRebuilds_;
+    }
+
+    // ③ 算输出缓冲要多大。
+    //
+    //    outCount = 源样本数 × (目标采样率 / 源采样率)，向上取整。
+    //    av_rescale_rnd 做的就是有理数换算（内部 64 位整数，避免浮点误差）。
+    //
+    //    +256 是【余量】。为什么需要？因为重采样滤波器有"分数延迟"，
+    //    输出样本数可能比理论值多几个。留点余量就不用每次精确计算，
+    //    多出来的部分按实际返回值 converted 处理即可。
+    const int outCount = static_cast<int>(av_rescale_rnd(
+        f->nb_samples, tgtFreq_, f->sample_rate, AV_ROUND_UP)) + 256;
+
+    // av_samples_get_buffer_size 算"这么多样本、这种格式、紧凑排列"要多少字节。
+    // 最后一个参数 1 = 紧凑（interleaved）—— 所有声道的数据交替排列，
+    // 正是声卡要的布局。
+    const int outBytes = av_samples_get_buffer_size(
+        nullptr, tgtLayout_.nb_channels, outCount, AV_SAMPLE_FMT_S16, 1);
+    if (outBytes <= 0) { sampQ_.next(); return -1; }
+
+    // ★ 从【自有缓冲】里取空间。resize 在容量够时不会重新分配，
+    //   所以逐帧调用不会反复 malloc —— 这是"缓冲复用"。
+    //   关键点：这块内存属于我们自己，不属于帧队列。
+    resampleBuf_.resize(outBytes);
+    uint8_t* outPlanes[1] = { resampleBuf_.data() };
+
+    // ④ 转换。
+    //    swr_convert 的参数：
+    //      (swr, 输出平面数组, 输出样本数上限, 输入平面数组, 输入样本数)
+    //
+    //    f->extended_data 是源数据的平面指针数组：
+    //      · FLTP（分平面）时，[0]=左声道、[1]=右声道、……各指向独立缓冲；
+    //      · S16（交织）时，[0] 指向全部交织数据。
+    //    swr_convert 会按我们设置的 in/out 格式自己处理这两种情况。
+    //
+    //    类型转换说明：extended_data 是 uint8_t**，而 swr_convert 要
+    //    const uint8_t** —— 只是 const 修饰的差异，用 const_cast 桥一下。
+    const int converted = swr_convert(swr_.get(), outPlanes, outCount,
+                                      const_cast<const uint8_t**>(f->extended_data),
+                                      f->nb_samples);
+    if (converted < 0) { sampQ_.next(); return -1; }
+
+    // 实际产出的字节数 = 输出样本数 × 声道数 × 每样本字节数(S16 = 2)
+    const int dataBytes = converted * tgtLayout_.nb_channels
+                          * av_get_bytes_per_sample(AV_SAMPLE_FMT_S16);
+
+    audioBuf_     = resampleBuf_.data();
+    audioBufSize_ = dataBytes;
+    // ★★ M9 修正：这里要存帧的【结束 PTS】，不是起始 PTS。
+    //
+    //   参考工程写的是 `audioClock_ = af->pts;`，配合后面的
+    //   `audClk_.set(audioClock_ - remain)` 推出来的播放头会整整
+    //   早一个音频帧（1024 采样 @44.1kHz ≈ 23ms）。代入两个极端看：
+    //       刚解出一帧（remain = 整帧）: 播放头 = PTS − 帧时长   ← 早了一帧
+    //       帧取完时    （remain = 0） : 播放头 = PTS            ← 应该是 PTS + 帧时长
+    //
+    //   ffplay 的约定是 audio_clock = 帧 PTS + 帧时长（也就是"这一帧播完时
+    //   应该到哪儿"），再减去缓冲里还没播的时长：
+    //       刚解出一帧: (PTS + 帧时长) − 帧时长 = PTS            ✓
+    //       帧取完时  : (PTS + 帧时长) − 0     = PTS + 帧时长    ✓
+    //   这样才严丝合缝。帧时长在 audioDecodeThread 里已经算好存在 slot->duration 里。
+    audioClock_   = af->pts + af->duration;
+
+    // ★★★ 数据已经拷进自有缓冲了，现在才可以释放帧队列槽位。
+    //
+    //   这个顺序是【本模块最容易被写错的地方】。
+    //   老工程写的是"先 frame_queue_next 再引用帧里的 data"——
+    //   而 next() 会 av_frame_unref 把像素/采样数据还回去，
+    //   于是后面读到的是已释放内存（use-after-free）。
+    //   表现为偶发爆音、或者随机崩溃，极难复现。
+    //
+    //   正确顺序：先 swr_convert 到自己的缓冲 → 再 next()。
+    sampQ_.next();
+    return dataBytes;
+}
+
+// ---------------------------------------------------------------------------
+// pullAudio —— 供 SDL 音频回调拉取 PCM（★ 运行在 SDL 音频线程里）
+// ---------------------------------------------------------------------------
+int FFPlayer::pullAudio(uint8_t* dst, int bytes)
+{
+    int copied = 0;
+
+    // SDL 一次可能要很多字节（比如 16KB），而一帧重采样后可能只有 4KB，
+    // 所以要循环若干次，跨越多帧来填满。
+    while (copied < bytes) {
+        // 当前帧的数据取完了 → 解下一帧
+        if (audioBufIndex_ >= audioBufSize_) {
+            if (decodeOneAudioFrame() < 0)
+                break;          // ★ 没数据了：跳出填充循环，但【不 return】
+            audioBufIndex_ = 0;
+        }
+
+        const int avail = audioBufSize_ - audioBufIndex_;
+        const int chunk = std::min(avail, bytes - copied);
+        if (audioBuf_)
+            std::memcpy(dst + copied, audioBuf_ + audioBufIndex_, chunk);
+        else
+            std::memset(dst + copied, 0, chunk);   // 理论上不会走到
+        audioBufIndex_ += chunk;
+        copied += chunk;
+    }
+
+    // ★★★ 推进音频主时钟 —— 全项目同步逻辑的源头 ★★★
+    //
+    //   问题：声卡不会告诉我们"此刻正好播到第几微秒"。SDL 的回调只知道
+    //        "我现在还需要多少字节"，这是"未来需求"，不是"当前进度"。
+    //
+    //   解法：用"当前帧的 PTS 减去尚未被取走的时长"来推算播放头位置。
+    //
+    //        audioClock_             = 这一帧的起始 PTS
+    //        audioBufSize_ - Index_  = 这一帧还剩多少字节没交给声卡
+    //        除以 bytesPerSecond      = 还剩多少"秒"的音频没播
+    //
+    //        播放头 ≈ 帧 PTS − 剩余时长
+    //
+    //   直觉验证：
+    //     · 刚取到一帧时（剩余 = 整帧），播放头 = PTS             ✓
+    //     · 帧快播完时（剩余 → 0），播放头 → PTS + 帧时长         ✓
+    //   所以这个估计是【平滑且单调】的，误差被限制在一次回调的粒度内
+    //  （几毫秒），而且每次回调都重算，不会累积漂移。
+    //
+    //   ★★ M9 修正：这段【必须无条件执行】，不能因为"没取到新数据"就跳过。
+    //      参考工程在没数据时直接 return 了，于是时钟失去了锚定，
+    //      只能靠 get() 的系统时间外推一路跑下去 —— 实测播到 5 秒的素材，
+    //      位置读数涨到了 7.7 秒还在涨。
+    //      现在的行为：没数据时 remain = 0，等于把时钟【按住】在最后一帧的
+    //      PTS 上。这也正是 ffplay 的做法：它的音频回调即使遇到 underrun
+    //      也会用同一个 audio_clock 反复重锚定，效果就是"把时钟按住"。
+    if (!std::isnan(audioClock_) && audioDev_.bytesPerSecond() > 0) {
+        const double remain = static_cast<double>(audioBufSize_ - audioBufIndex_)
+                              / audioDev_.bytesPerSecond();
+        audClk_.set(audioClock_ - remain);
+    }
+
+    if (copied == 0)
+        return -1;              // 让 AudioDevice 去补静音（M7 的兜底在这里兑现）
+
+    // 顺便统计一下峰值，用来验证"确实有非静音的声音数据经过了这里"。
+    // （纯沙盒用途，最终工程里没有这几行）
+    {
+        const auto* s = reinterpret_cast<const int16_t*>(dst);
+        const int n  = copied / 2;
+        int peak = statPcmPeak_;
+        for (int i = 0; i < n; ++i) {
+            const int v = s[i] < 0 ? -s[i] : s[i];
+            if (v > peak) peak = v;
+        }
+        std::lock_guard<std::mutex> lock(statMtx_);
+        statPcmBytes_ += copied;
+        statPcmPeak_   = peak;
+    }
+
+    return copied;
 }

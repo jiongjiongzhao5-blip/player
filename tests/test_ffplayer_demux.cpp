@@ -211,13 +211,25 @@ int main(int argc, char* argv[])
         const int aq = player.audioQueue().nbPackets();
         const int vq = player.videoQueue().nbPackets();
         std::printf("        队列里的条目数: 音频 %d，视频 %d\n", aq, vq);
-        std::printf("        参考值(真实包数): 音频 %d，视频 %d\n", ref.audioPkts, ref.videoPkts);
+        std::printf("        投递总量      : 音频 %d，视频 %d\n",
+                    ref.audioPkts + 2, ref.videoPkts + 2);
 
-        // 每个队列 = 真实包 + 1 个 flush 标记（start 时放的）+ 1 个 EOF 空包
-        check(aq == ref.audioPkts + 2,
-              "★ 音频队列条目数 = 真实音频包数 + flush 标记 + EOF 空包");
+        // 视频：M8~M10 之间还没有消费者，所以队列里应该【一条不差】地躺着全部数据。
         check(vq == ref.videoPkts + 2,
-              "★ 视频队列条目数 = 真实视频包数 + flush 标记 + EOF 空包");
+              "★ 视频队列条目数 = 真实视频包数 + flush 标记 + EOF 空包（当前尚无消费者）");
+
+        // ★ 音频：M9 加上音频解码线程之后，它会把包取走，
+        //   所以"条目数 == 投递总量"不再成立 —— 这是【正确的演进】，不是回归。
+        //   断言相应改成三条更稳健、也更本质的检查。
+        //   （音频链路的精确验证由 M9 的实验台负责：解码帧数、PCM 字节数、峰值…）
+        check(player.audioQueue().serial() >= 1, "音频队列已被启动（serial >= 1）");
+        check(aq <= ref.audioPkts + 2, "音频队列存量不超过投递总量");
+        msleep(300);
+        const auto info = player.audioOutInfo();
+        std::printf("        音频解码线程已解出 %d 帧（说明消费者确实在工作）\n",
+                    info.decodedFrames);
+        check(info.decodedFrames > 0,
+              "★ 音频链路有消费者在取包 —— 分发确实发生了，只是被即时消耗了");
     }
 
     // -----------------------------------------------------------------------

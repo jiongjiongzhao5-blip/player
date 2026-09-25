@@ -329,17 +329,46 @@ vpl_copy_sdl3_dll(test_audiodevice)
 # ===========================================================================
 # 14. M8 测试目标：FFPlayer 解复用阶段
 # ===========================================================================
-# ffplayer.cpp 依赖：decoder / packet_queue / frame_queue / message_queue
-# （SDL3 要到 M9 才有音频输出，所以这一轮还不用链接它）
+# ⚠ M9 起本目标也需要 SDL3：因为 ffplayer.h 现在 include 了 audiodevice.h。
+#   教训：**改了头文件的依赖，要检查所有引用它的目标**，否则那个目标会
+#   编译失败 —— 而如果它是个独立可执行文件，你会不小心跑到上一次的
+#   旧产物上，得到一个"假通过"。
 add_executable(test_ffplayer
     tests/test_ffplayer_demux.cpp
     src/ffplayer.cpp
+    src/audiodevice.cpp
     src/decoder.cpp
     src/packet_queue.cpp
     src/frame_queue.cpp
     src/message_queue.cpp
 )
 target_include_directories(test_ffplayer PRIVATE src)
-target_link_libraries(test_ffplayer PRIVATE vpl_ffmpeg)
+target_link_libraries(test_ffplayer PRIVATE
+    SDL3::SDL3
+    vpl_ffmpeg
+)
 vpl_apply_common_options(test_ffplayer)
 vpl_copy_runtime_dlls(test_ffplayer)
+vpl_copy_sdl3_dll(test_ffplayer)
+
+# ===========================================================================
+# 15. M9 测试目标：音频链路 + 音频主时钟
+# ===========================================================================
+# 这一轮开始需要 SDL3（音频输出）和 swresample（在 vpl_ffmpeg 里）。
+add_executable(test_ffplayer_audio
+    tests/test_ffplayer_audio.cpp
+    src/ffplayer.cpp
+    src/audiodevice.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+    src/message_queue.cpp
+)
+target_include_directories(test_ffplayer_audio PRIVATE src)
+target_link_libraries(test_ffplayer_audio PRIVATE
+    SDL3::SDL3
+    vpl_ffmpeg
+)
+vpl_apply_common_options(test_ffplayer_audio)
+vpl_copy_runtime_dlls(test_ffplayer_audio)
+vpl_copy_sdl3_dll(test_ffplayer_audio)

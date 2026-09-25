@@ -128,6 +128,7 @@ public:
         pts_          = std::nan("");
         pts_drift_    = std::nan("");   // ★ 修复点（原工程是 0.0）
         last_updated_ = 0.0;
+        paused_       = false;          // 复位时也要清掉冻结状态
     }
 
     // 以"当前系统时间"为基准锚定时钟 —— 最常用的入口，
@@ -154,8 +155,42 @@ public:
     double get() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // ★ 暂停时【冻结】：直接返回最近一次锚定的读数，不做时间外推。
+        //
+        //   这一条是 M9 补上的。M5 实现时我们只做了"漂移补偿"，
+        //   漏了"暂停冻结"这一半 —— ffplay 的 Clock 里有 paused 字段，
+        //   我们当时为了简化删掉了。结果 M9 一测就暴露：
+        //   暂停期间时钟照样按系统时间往前走（实测暂停 600ms，位置涨了 601ms）。
+        //   后果很直观：暂停时进度条还在跑；恢复的瞬间又会"跳回去"。
+        //
+        //   教训：所谓"简化"如果删掉的是【另一个使用场景需要的语义】，
+        //        那就不是简化，是缺陷。这个字段正是媒体时钟区别于
+        //        "纯计时器"的地方 —— 计时器只会流逝，媒体时钟会被挂起。
+        if (paused_)
+            return pts_;
         const double now = av_gettime_relative() / 1000000.0;
         return pts_drift_ + now * speed_;
+    }
+
+    // 暂停 / 恢复时钟。
+    //
+    // 【恢复时为什么必须重锚定】
+    //   暂停期间 pts_drift_ 没动，而系统时间一直在走。如果只是把 paused_
+    //   置回 false，get() 会算成 pts_drift_ + now*speed_ ——
+    //   相当于"把暂停的那段时长也算作播放过了"，读数会突然向前跳一大截。
+    //   所以恢复的瞬间要以【冻结时的读数】为基准、在当前时刻重新锚定一次，
+    //   让位置曲线在恢复点连续。
+    void setPaused(bool paused)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (paused_ == paused)
+            return;
+        if (!paused) {
+            const double curr = pts_;       // 冻结期间 get() 返回的就是它
+            const double now  = av_gettime_relative() / 1000000.0;
+            pts_drift_ = curr - now * speed_;
+        }
+        paused_ = paused;
     }
 
     // 设置播放倍速。
@@ -208,6 +243,7 @@ private:
     double last_updated_ = 0.0;           // 最近一次锚定的系统时间
                                           // ⚠ 本工程里只写不读，属于"留档"字段
     double speed_        = 1.0;           // 播放倍速
+    bool   paused_       = false;         // ★ M9 补上：暂停时冻结读数
 };
 
 #endif // CLOCK_H
