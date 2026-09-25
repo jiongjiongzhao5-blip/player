@@ -78,11 +78,16 @@ public:
     void setPaused(bool paused);
     void setVolume(float linear01);   // 0.0 静音 ~ 1.0 原始音量
     void setSpeed(float ratio);       // 1.0 正常，>1 加速（会变调，见 .cpp 说明）
+    float speed() const { return speed_; }
 
     int sampleRate() const { return spec_.freq; }
     int channels() const { return spec_.channels; }
     int frameBytes() const;           // 一个采样帧（所有声道各一个采样）的字节数
-    int bytesPerSecond() const;       // 每秒消耗多少字节 —— FFPlayer 用它算剩余时长
+    // 每秒消耗多少字节 ★ 注意：它把【播放倍速】也算进去了 ——
+    // 倍速下流是以 ratio 倍的速度消耗输入 PCM 的。
+    // FFPlayer 用它把"还剩下多少字节"换算成"还有多少秒没播"，
+    // 所以这个换算必须反映真实消耗速率，否则倍速下主时钟会偏。
+    int bytesPerSecond() const;
 
 private:
     // SDL 线程回调。SDLCALL 是平台调用约定宏（Windows 上是 __cdecl），
@@ -93,6 +98,7 @@ private:
     SDL_AudioStream* stream_ = nullptr;   // 流是裸指针：SDL 没有 RAII，我们在 close() 里管
     SDL_AudioSpec    spec_{};             // SDL3 里只剩 format / channels / freq 三个字段
     PullCallback     pull_;
+    float            speed_  = 1.0f;      // 当前播放倍速（setSpeed 记下，供 bytesPerSecond 换算）
 };
 
 #endif // AUDIODEVICE_H

@@ -393,3 +393,24 @@ target_link_libraries(test_ffplayer_video PRIVATE
 vpl_apply_common_options(test_ffplayer_video)
 vpl_copy_runtime_dlls(test_ffplayer_video)
 vpl_copy_sdl3_dll(test_ffplayer_video)
+
+# ===========================================================================
+# 17. M11 测试目标：播放控制与生命周期收尾
+# ===========================================================================
+add_executable(test_ffplayer_control
+    tests/test_ffplayer_control.cpp
+    src/ffplayer.cpp
+    src/audiodevice.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+    src/message_queue.cpp
+)
+target_include_directories(test_ffplayer_control PRIVATE src)
+target_link_libraries(test_ffplayer_control PRIVATE
+    SDL3::SDL3
+    vpl_ffmpeg
+)
+vpl_apply_common_options(test_ffplayer_control)
+vpl_copy_runtime_dlls(test_ffplayer_control)
+vpl_copy_sdl3_dll(test_ffplayer_control)

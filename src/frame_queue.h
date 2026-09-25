@@ -51,6 +51,20 @@ struct Frame
     int    width    = 0;
     int    height   = 0;
     int    format   = 0;         // 视频是 AVPixelFormat，音频是 AVSampleFormat
+
+    // ★ M11 补上：这一帧所属的【播放序列号】。
+    //
+    //   它是 M3 埋下的那个缺口的最后一块拼图：
+    //     · PacketQueue 维护 serial（flush 包才 +1）
+    //     · Decoder::decodeFrame 把包的 serial 存进 pktSerial_
+    //     · 现在我们把它一路带到帧上
+    //   于是渲染/播放那一侧就能做精确判断：
+    //       if (frame.serial != queue.serial())  // 这是 seek 之前的残留帧
+    //          丢弃
+    //
+    //   在此之前，工程只能靠"PTS 比时钟前跳超过 1 秒"这种启发式去猜，
+    //   那个阈值既可能误判也可能漏判。serial 是精确的、零猜测的。
+    int    serial   = 0;
 };
 
 class FrameQueue

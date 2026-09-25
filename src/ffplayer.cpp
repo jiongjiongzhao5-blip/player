@@ -169,9 +169,30 @@ void FFPlayer::setPaused(bool paused)
 // 校验交给 AudioDevice（内部有 std::clamp）。
 void FFPlayer::setVolume(float linear01) { audioDev_.setVolume(linear01); }
 
-// 倍速：注意这里【只调了 AudioDevice】，没有调 audClk_.setSpeed()。
-// 这是参考工程遗留的一处"没接线"——详见 .cpp 文件末尾的说明。
-void FFPlayer::setSpeed(float ratio) { audioDev_.setSpeed(ratio); }
+// 倍速。
+//
+// ★ M11 补上了欠了两轮的那一行：`audClk_.setSpeed(ratio)`。
+//
+//   参考工程只调了 AudioDevice（SDL 的频率比），忘了调时钟 ——
+//   M5 发现时我把它记成了"未接线"，现在补上。
+//
+//   为什么必须有这一行？
+//     时钟的值是 get() = pts_drift + now * speed 算出来的，也就是
+//     "锚定值 + 流逝时间 × 倍速"。如果 speed 永远是 1，那么两次锚定之间
+//     时钟只按 1 倍速外推 —— 而 2 倍速播放时媒体位置每墙钟秒前进 2 秒，
+//     时钟就会一直落在后面，视频会认为"我还早"，于是画面越拖越晚。
+//
+//   没有它的时候，2 倍速下画面会明显滞后于声音。
+void FFPlayer::setSpeed(float ratio)
+{
+    // 防御：非正倍速没有意义。SDL 的频率比传 0 或负数行为未定义
+    // （可能变成"倒放"或直接失败），所以在入口就挡掉。
+    if (ratio <= 0.0f)
+        return;
+
+    audioDev_.setSpeed(ratio);   // 让声卡按倍速消耗 PCM（会变调，见 M7 的说明）
+    audClk_.setSpeed(ratio);     // ★ 让时钟也按倍速外推（并且在切换瞬间保持读数连续）
+}
 
 double FFPlayer::positionSeconds() const
 {
@@ -239,6 +260,22 @@ void FFPlayer::handleSeekRequest()
     completedPosted_ = false;
     // seek 之后要允许重新通知"播放结束"（比如 seek 到接近结尾）
     eof_ = false;
+
+    // ★★ M11 补上：暂停状态下 seek，要主动把时钟挪到新位置。
+    //
+    //   为什么需要？平时时钟是被【音频回调】反复锚定的：
+    //     pullAudio 每取一帧就 set(当前播放头) 一次。
+    //   但暂停时音频回调根本不跑（SDL 设备停了），于是没有任何人
+    //   去更新时钟 —— 它的读数会一直停在暂停前的位置。
+    //
+    //   后果：用户在【暂停状态】下拖动进度条，声音画面确实跳到新位置了，
+    //   可界面上显示的播放时间和进度条纹丝不动。恢复播放的瞬间才会
+    //   猛地跳到新位置 —— 体验上像是"拖了没反应，一按播放才生效"。
+    //
+    //   修法：seek 执行完，如果当前是暂停态，就直接用 seek 目标位置
+    //   锚定时钟。之后恢复播放时，音频回调会再用真实 PTS 修正一次。
+    if (paused_.load() && target != AV_NOPTS_VALUE)
+        audClk_.set(static_cast<double>(target) / AV_TIME_BASE);
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +469,8 @@ void FFPlayer::audioDecodeThread()
         // 帧时长 = 采样数 / 采样率（音频帧的长度是精确已知的，不像视频要看帧率）
         slot->duration = static_cast<double>(frame->nb_samples) / frame->sample_rate;
         slot->format   = frame->format;   // 这里存的是 AVSampleFormat
+        // ★ M11：把 packet 的 serial 带到帧上（供播放侧判断"是不是 seek 之前的残留帧"）
+        slot->serial   = audDec_.pktSerial();
 
         // ★ move_ref 而不是拷贝：把解码帧的数据"搬"进队列槽位，
         //   避免一次几 KB 的 memcpy。槽位里的 AVFrame 对象是复用的（M3 讲过）。
@@ -471,7 +510,25 @@ int FFPlayer::decodeOneAudioFrame()
     if (eof_.load() && sampQ_.nbRemaining() == 0)
         return -1;
 
-    Frame* af = sampQ_.peekReadable();
+    // ★★ M11：丢弃"过期音频帧"（seek 之前残留的），循环重试直到拿到
+    //   当前播放序列的帧。
+    //
+    //   为什么需要它？seek 之后音频队列已经 reset（serial +1）并清空，
+    //   但解码线程手里可能还攥着几帧旧数据，它们会在 flush 之后才被 push
+    //   进 sampQ_ —— 于是队列里混进了 serial 较旧的帧。如果照常播放，
+    //   用户会先听到一小段"跳回去"的旧声音。
+    //
+    //   guard 上限 64 只是防御性的：正常情况最多丢两三帧就能拿到新的。
+    Frame* af = nullptr;
+    for (int guard = 0; guard < 64; ++guard) {
+        af = sampQ_.peekReadable();
+        if (!af)
+            return -1;                       // 上游 abort
+        if (af->serial == audioQ_.serial())
+            break;                           // 是当前序列的帧，可以用
+        sampQ_.next();                       // 过期帧：丢掉，再取下一帧
+        af = nullptr;
+    }
     if (!af)
         return -1;
 
@@ -717,6 +774,8 @@ void FFPlayer::videoDecodeThread()
         slot->width    = frame->width;
         slot->height   = frame->height;
         slot->format   = frame->format;
+        // ★ M11：把 packet 的 serial 带到帧上
+        slot->serial   = vidDec_.pktSerial();
         av_frame_move_ref(slot->frame.get(), frame.get());
         pictQ_.push();
     }
@@ -795,6 +854,21 @@ void FFPlayer::videoRefresh(double& remainingTime)
 
     Frame* vp = pictQ_.peek();
 
+    // ★★ M11：serial 检查 —— 丢弃 seek 之前残留的视频帧。
+    //
+    //   这是 M3 埋下的那个缺口的最后一块拼图。在此之前，工程只能靠
+    //   "PTS 比时钟前跳超过 1 秒"这种启发式去猜哪一帧是残留的 ——
+    //   阈值既可能误判（真的 PTS 跳变被当成残留）也可能漏判
+    //   （残留帧的 PTS 恰好没跳那么多）。
+    //
+    //   现在有了精确判据：帧的 serial 与队列当前 serial 不一致 = 它是
+    //   上一次 seek 之前的产物，直接丢，连显示都不显示。
+    //   ffplay 用的就是这个判断（`if (vp->serial != is->videoq.serial)`）。
+    if (vp->serial != videoQ_.serial()) {
+        pictQ_.next();
+        return;
+    }
+
     // ---- 特殊情况：帧没有时间戳 ----
     // 无法参与同步，只能直接显示。真实流里少见，但存在（比如某些裸流）。
     if (std::isnan(vp->pts)) {
@@ -814,20 +888,20 @@ void FFPlayer::videoRefresh(double& remainingTime)
         // 什么时候需要重新锚定？三个条件：
         //   ① !videoClockInit_      ：还没锚定过（播放刚开始）
         //   ② isnan(master)         ：时钟是空的（M5 修好 NaN 语义后这条才有意义）
-        //   ③ vp->pts - master > 1.0：★ PTS 比时钟【前跳超过 1 秒】
+        //   ③ vp->pts - master > 1.0：PTS 比时钟【前跳超过 1 秒】
         //
-        // ★ 第 ③ 条是参考工程用来兜一个坑的启发式规则，值得单独说：
-        //     seek 之后 pictQ_.flush() 清空了队列，但解码线程手里可能
-        //     还攥着几帧旧数据，flush 之后又被 push 进来 —— 于是队列里
-        //     混进了 PTS 很旧的残留帧。如果第 ①/② 条恰好被这些残帧触发，
-        //     时钟就被锚回了旧位置（比如从 3.0 秒锚回 0.5 秒）。
-        //     等真正的新帧（PTS 3.0）到达时，它比时钟大了 2.5 秒，
-        //     第 ③ 条就会把它识别为"大幅前跳"，于是重新锚定、纠正回来。
+        // ★ 第 ③ 条的角色在 M11 变了，值得说清楚：
         //
-        //     这就是 M3 提到的"serial 机制最后一步没接"所留下的缺口，
-        //     工程用一个阈值启发式把它糊上了。正确做法是在渲染路径上
-        //     直接比较帧的 serial 与队列当前 serial（ffplay 的做法），
-        //     那才是精确的 —— 留到 M11 一起收尾。
+        //   它原本是参考工程用来【兜 serial 缺口】的启发式 ——
+        //   seek 之后队列里可能混进 PTS 很旧的残留帧，把时钟错误地锚回旧位置；
+        //   等真正的新帧到达时，它比时钟大很多，靠这条规则重新锚定、纠正回来。
+        //
+        //   M11 在 videoRefresh 开头加了精确的 serial 检查（残留帧直接被丢弃，
+	//   根本走不到这里），所以"糊住缺口"这个职责已经不需要它了。
+        //
+        //   现在它保留下来只做一件事：应对【真实的 PTS 跳变】——
+        //   比如某些流中间有断点、或时间戳不连续。这时时钟确实会远远落后，
+        //   靠这条规则重新锚定比"慢慢追"更合理。它从"补丁"变成了"安全网"。
         if (!videoClockInit_ || std::isnan(master) || vp->pts - master > 1.0) {
             audClk_.set(vp->pts);
             videoClockInit_ = true;

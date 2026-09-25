@@ -169,6 +169,9 @@ void AudioDevice::setSpeed(float ratio)
 {
     if (stream_)
         SDL_SetAudioStreamFrequencyRatio(stream_, ratio);
+    // ★ M11：把倍速记下来。它是 bytesPerSecond() 的换算依据 ——
+    //   倍速下流消耗输入 PCM 的速度也按比例变化。
+    speed_ = ratio;
 }
 
 // 一个采样帧的字节数 = 每声道 2 字节（S16）× 声道数。
@@ -181,7 +184,11 @@ int AudioDevice::frameBytes() const
 // 每秒消耗多少字节。★ 这个数字很重要：
 //   它把"还有多少字节没播"换算成"还有多少秒"，
 //   正是 M9 里推进音频主时钟时那个 remain 的计算依据。
+//
+//   M11 修正：必须把倍速算进去。设了 FrequencyRatio = R 之后，
+//   设备消耗输入样本的速度变成 R 倍 —— 如果这里仍按 1 倍速算，
+//   remain 会被高估 R 倍，倍速下的主时钟就会偏。
 int AudioDevice::bytesPerSecond() const
 {
-    return spec_.freq * frameBytes();
+    return static_cast<int>(spec_.freq * frameBytes() * speed_);
 }
