@@ -145,15 +145,53 @@ function(vpl_copy_runtime_dlls tgt)
 endfunction()
 
 # ===========================================================================
-# 4. 主程序
+# 4. 主程序（★ M13 起这是完整成品：内核 + 门面 + 界面）
 # ===========================================================================
-# 仍然没有 WIN32 关键字 —— 保留控制台看日志。
-add_executable(voice_player_learn
+# 前 12 轮这个目标只有 src/main.cpp（M1 那个空窗口）。现在把全部东西装进来：
+#   · 界面层：mainwind / ctrlbar / titlebar / playlistwind / displaywind
+#   · 适配层：mediaplayer
+#   · 内核层：ffplayer / decoder / 三个队列
+#   · 输出层：audiodevice / imagescaler
+#
+# ★★ M13 最后一步：加回 WIN32 关键字 ★★
+#
+#   WIN32 在 add_executable 里表示"这是 Windows 图形子系统程序"——
+#   运行时【不弹控制台黑窗】，双击 exe 就是一个干净的播放器。
+#
+#   前面 12 轮我们一直【故意不加】它，因为控制台是唯一的调试输出通道
+#   （qDebug 输出的状态迁移、帧计数都靠它看）。到 M13 成品阶段才加回来 ——
+#   这正是真实项目的节奏：开发期要可观测性，交付期要干净。
+#
+#   加了之后 qDebug 会走 OutputDebugString（用 DebugView 或 VS 的输出窗口能看），
+#   不再进控制台 —— 对 GUI 程序来说这是正常的。
+add_executable(voice_player_learn WIN32
     src/main.cpp
+    # 界面层
+    src/mainwind.cpp        src/mainwind.h
+    src/ctrlbar.cpp         src/ctrlbar.h
+    src/titlebar.cpp        src/titlebar.h
+    src/playlistwind.cpp    src/playlistwind.h
+    src/displaywind.cpp     src/displaywind.h
+    # 适配层
+    src/mediaplayer.cpp     src/mediaplayer.h
+    # 内核层
+    src/ffplayer.cpp        src/ffplayer.h
+    src/decoder.cpp         src/decoder.h
+    src/packet_queue.cpp    src/packet_queue.h
+    src/frame_queue.cpp     src/frame_queue.h
+    src/message_queue.cpp   src/message_queue.h
+    # 输出层
+    src/audiodevice.cpp     src/audiodevice.h
+    src/imagescaler.cpp     src/imagescaler.h
+    # 纯头文件的模块（列出来是为了让 IDE 显示、也方便将来加源文件）
+    src/clock.h  src/ffmsg.h  src/av_utils.h
+    # 资源：三个按钮图标。AUTORCC 会把它们编进 exe，运行时用 ":/icons/..." 访问
+    resources/resources.qrc
 )
 target_include_directories(voice_player_learn PRIVATE src)
 target_link_libraries(voice_player_learn PRIVATE
     Qt6::Widgets
+    SDL3::SDL3
     vpl_ffmpeg
 )
 vpl_apply_common_options(voice_player_learn)
@@ -294,6 +332,10 @@ function(vpl_copy_sdl3_dll tgt)
             COMMENT "拷贝 SDL3.dll")
     endif()
 endfunction()
+
+# 主程序（定义在文件上方）也需要拷 SDL3.dll ——
+# CMake 的函数必须【先定义后使用】，所以这一句只能放在这里。
+vpl_copy_sdl3_dll(voice_player_learn)
 
 # ===========================================================================
 # 12. M7 测试目标：图像转换器

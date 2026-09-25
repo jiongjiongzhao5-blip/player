@@ -31,6 +31,19 @@ void MediaPlayer::setState(PlaybackState s)
     if (state_ == s)
         return;                            // 状态没变就别发信号，减少 UI 无谓刷新
     state_ = s;
+
+    // 打一条状态日志。
+    // 真实播放器都会有这类日志 —— 用户报"卡住/黑屏"时，第一件事就是看
+    // 状态停在哪一步（是 Preparing 没过去？还是 Playing 了但没帧？）。
+    // 在 WIN32（无控制台）构建里它进调试器输出，没有副作用。
+    qDebug() << "[MediaPlayer] 状态 ->"
+             << (s == PlaybackState::Idle      ? "Idle"
+               : s == PlaybackState::Preparing ? "Preparing"
+               : s == PlaybackState::Playing   ? "Playing"
+               : s == PlaybackState::Paused    ? "Paused"
+               : s == PlaybackState::Completed ? "Completed"
+                                               : "Error");
+
     emit stateChanged(s);
 }
 
