@@ -414,3 +414,31 @@ target_link_libraries(test_ffplayer_control PRIVATE
 vpl_apply_common_options(test_ffplayer_control)
 vpl_copy_runtime_dlls(test_ffplayer_control)
 vpl_copy_sdl3_dll(test_ffplayer_control)
+
+# ===========================================================================
+# 18. M12 测试目标：MediaPlayer 门面层（★ 第一个 Qt 目标）
+# ===========================================================================
+# 需要 Qt6（QObject/QTimer/QImage）+ 完整内核 + SDL3。
+# QImage 在 Qt6::Gui 里，QObject/QTimer 在 Core 里；这里直接链 Widgets
+# 保持和主工程一致。
+add_executable(test_mediaplayer
+    tests/test_mediaplayer.cpp
+    src/mediaplayer.h
+    src/mediaplayer.cpp
+    src/ffplayer.cpp
+    src/audiodevice.cpp
+    src/decoder.cpp
+    src/packet_queue.cpp
+    src/frame_queue.cpp
+    src/message_queue.cpp
+    src/imagescaler.cpp
+)
+target_include_directories(test_mediaplayer PRIVATE src)
+target_link_libraries(test_mediaplayer PRIVATE
+    Qt6::Widgets
+    SDL3::SDL3
+    vpl_ffmpeg
+)
+vpl_apply_common_options(test_mediaplayer)
+vpl_copy_runtime_dlls(test_mediaplayer)
+vpl_copy_sdl3_dll(test_mediaplayer)
